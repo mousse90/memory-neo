@@ -1,0 +1,97 @@
+# memIgnore — memory-neo default ignore patterns
+
+# Syntax: same as .gitignore
+
+# Lines starting with # are comments
+
+# Place this file in your project root to customize
+
+# ── Version control ───────────────────────────────────────────────────────────
+
+.git/
+.svn/
+.hg/
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+
+.DS_Store
+Thumbs.db
+
+# ── Python ────────────────────────────────────────────────────────────────────
+
+**pycache**/
+_.pyc
+_.pyo
+_.pyd
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+_.egg-info/
+.eggs/
+dist/
+build/
+venv/
+.venv/
+env/
+.env/
+
+# ── JavaScript / TypeScript ───────────────────────────────────────────────────
+
+node_modules/
+.npm/
+.next/
+.nuxt/
+.svelte-kit/
+out/
+coverage/
+.nyc_output/
+storybook-static/
+_.min.js
+_.min.css
+\*.map
+
+# ── Secrets & env files ───────────────────────────────────────────────────────
+
+.env
+.env.\*
+_.pem
+_.key
+
+# ── IDE / Editor ──────────────────────────────────────────────────────────────
+
+.vscode/
+.idea/
+_.swp
+_.swo
+.VSCodeCounter/
+
+# ── Build / Deploy / Cloud ────────────────────────────────────────────────────
+
+.vercel/
+.fly/
+.terraform/
+\*.tfstate
+target/
+Pods/
+.gradle/
+vendor/
+.devcontainer/
+.codesandbox/
+
+# ── Docs build ────────────────────────────────────────────────────────────────
+
+\_site/
+.docusaurus/
+
+# ── Logs / Temp ───────────────────────────────────────────────────────────────
+
+_.log
+_.tmp
+_.temp
+_.cache
+.cache/
+tmp/
+temp/

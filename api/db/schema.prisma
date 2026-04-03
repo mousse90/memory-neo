@@ -1,0 +1,94 @@
+// memory-neo/api/db/schema.prisma
+// Path: api/db/schema.prisma
+// Purpose: Supabase (PostgreSQL) schema — users, API keys, projects registry, logs
+// Deploy: prisma generate && prisma db push
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider             = "prisma-client-py"
+  interface            = "asyncio"
+  recursive_type_depth = 5
+}
+
+// ── Identity ──────────────────────────────────────────────────────────────────
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+
+  apiKeys    ApiKey[]
+  projects   Project[]
+  queryLogs  QueryLog[]
+  pushLogs   PushLog[]
+
+  @@map("users")
+}
+
+model ApiKey {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key       String    @unique          // SHA-256 hashed — never plaintext
+  label     String    @default("default")
+  lastUsed  DateTime? @map("last_used")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("api_keys")
+}
+
+// ── Project registry ──────────────────────────────────────────────────────────
+// Mirrors what's in Memgraph — used for listing projects per user
+// without querying Memgraph directly
+
+model Project {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  namespace String   @unique          // userId::projectName
+  fileCount Int      @default(0) @map("file_count")
+  fnCount   Int      @default(0) @map("fn_count")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt      @map("updated_at")
+
+  @@index([userId])
+  @@map("projects")
+}
+
+// ── Usage logs ────────────────────────────────────────────────────────────────
+
+model QueryLog {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projectName String   @map("project_name")
+  question    String
+  cypher      String
+  model       String   @default("claude")   // "claude" | "gpt-4o"
+  resultCount Int      @default(0) @map("result_count")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("query_logs")
+}
+
+model PushLog {
+  id           String   @id @default(cuid())
+  userId       String   @map("user_id")
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projectName  String   @map("project_name")
+  fileCount    Int      @map("file_count")
+  fnCount      Int      @map("fn_count")
+  nodesCreated Int      @map("nodes_created")
+  nodesMerged  Int      @map("nodes_merged")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("push_logs")
+}

@@ -1,0 +1,14 @@
+# memory-neo/requirements.api.txt
+# FastAPI backend dependencies
+
+fastapi>=0.111
+uvicorn[standard]>=0.29
+neo4j>=5.20          # Memgraph uses bolt protocol — compatible with neo4j driver
+anthropic>=0.28      # Claude (primary NLP)
+openai>=1.30         # GPT-4o (optional NLP)
+prisma>=0.13         # Supabase / PostgreSQL ORM
+python-dotenv>=1.0
+httpx>=0.27
+pydantic[email]>=2.7
+pydantic-settings>=2.3
+passlib[bcrypt]>=1.7

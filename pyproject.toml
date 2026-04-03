@@ -1,0 +1,30 @@
+# memory-neo/pyproject.toml
+# Path: pyproject.toml
+# Purpose: Build system + package metadata for pip install memory-neo
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memory-neo"
+version = "0.1.0"
+description = "Push your codebase to a graph DB and query it with natural language"
+readme = "docs/README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "memory-neo" }]
+
+dependencies = [
+    "click>=8.1",
+    "httpx>=0.27",
+    "rich>=13.7",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+memory-neo = "memory_neo.cli.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["memory_neo*"]

@@ -1,0 +1,32 @@
+# fly.toml app configuration file generated for memory-neo-graph on 2026-03-15T08:35:33+01:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'memory-neo-graph'
+primary_region = 'cdg'
+
+[build]
+  dockerfile = "memgraph.Dockerfile"
+
+[env]
+  MEMGRAPH_TELEMETRY_ENABLED = 'false'
+
+[[mounts]]
+  source = 'memgraph_data'
+  destination = '/var/lib/memgraph'
+
+[[services]]
+  protocol = 'tcp'
+  internal_port = 7687
+  ports = []
+
+  [services.concurrency]
+    type = 'connections'
+    hard_limit = 50
+    soft_limit = 40
+
+[[vm]]
+  cpu_kind = 'shared'
+  cpus = 2
+  memory_mb = 2048

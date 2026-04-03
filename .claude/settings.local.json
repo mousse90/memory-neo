@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flyctl status:*)",
+      "Bash(flyctl machine:*)",
+      "Bash(flyctl proxy:*)",
+      "Bash(echo \"Proxy PID: $!\")",
+      "Bash(python3 -c ':*)",
+      "Bash(flyctl logs:*)",
+      "Bash(kill %1)",
+      "Bash(lsof -ti:7687)",
+      "Bash(xargs kill:*)",
+      "Bash(flyctl ssh:*)",
+      "Bash(flyctl ips:*)",
+      "Bash(flyctl secrets:*)",
+      "Bash(flyctl deploy:*)",
+      "Bash(flyctl machines:*)",
+      "Bash(curl:*)",
+      "Bash(DATABASE_URL=\"postgresql://postgres:bJWAQddIQN6RoPse@db.bfoyxfojbofiwxkdoshg.supabase.co:5432/postgres\" prisma db:*)",
+      "Bash(npx vercel:*)",
+      "Bash(memory-neo push:*)",
+      "Bash(memory-neo login:*)"
+    ]
+  }
+}

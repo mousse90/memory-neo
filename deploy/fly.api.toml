@@ -1,0 +1,39 @@
+# memory-neo/deploy/fly.api.toml
+app            = 'memory-neo-api'
+primary_region = 'cdg'
+
+[build]
+  dockerfile = 'api.Dockerfile'
+
+[env]
+  ENVIRONMENT    = 'production'
+  MEMGRAPH_HOST  = 'memory-neo-graph.internal'
+  MEMGRAPH_PORT  = '7687'
+
+# Secrets injected via: fly secrets set KEY=value
+# ANTHROPIC_API_KEY, OPENAI_API_KEY, DATABASE_URL,
+# API_SECRET_SALT, DEV_API_KEY (kept for emergency bypass)
+
+[http_service]
+  internal_port       = 8080
+  force_https         = true
+  auto_stop_machines  = false     # paid plan — keep alive
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type       = 'requests'
+    hard_limit = 200
+    soft_limit = 150
+
+[[http_service.checks]]
+  interval   = '15s'
+  timeout    = '5s'
+  grace_period = '10s'
+  method     = 'GET'
+  path       = '/health'
+
+[[vm]]
+  cpu_kind  = 'performance'
+  cpus      = 1
+  memory_mb = 2048
