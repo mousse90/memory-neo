@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memory-neo"
-version = "0.1.0"
+version = "0.1.4"
 description = "Push your codebase to a graph DB and query it with natural language"
 readme = "docs/README.md"
 license = { text = "MIT" }
@@ -20,6 +20,10 @@ dependencies = [
     "httpx>=0.27",
     "rich>=13.7",
     "python-dotenv>=1.0",
+    "pyperclip>=1.8",
+    "tree-sitter>=0.21",
+    "tree-sitter-javascript>=0.21",
+    "tree-sitter-typescript>=0.21",
 ]
 
 [project.scripts]

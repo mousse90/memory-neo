@@ -1,0 +1,22 @@
+"filename", "language", "Python", "Markdown", "JSON", "Docker", "pip requirements", "Dotenv", "comment", "blank", "total"
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/.claude/settings.local.json", "JSON", 0, 0, 29, 0, 0, 0, 0, 1, 30
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/.env", "Dotenv", 0, 0, 0, 0, 0, -8, 0, -1, -9
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/DEPLOY.md", "Markdown", 0, 176, 0, 0, 0, 0, 0, 53, 229
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/api/db/prisma.py", "Python", 14, 0, 0, 0, 0, 0, 5, 6, 25
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/api/main.py", "Python", 16, 0, 0, 0, 0, 0, -35, 4, -15
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/api/routes/auth.py", "Python", 27, 0, 0, 0, 0, 0, 37, 26, 90
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/api/routes/nodes.py", "Python", 48, 0, 0, 0, 0, 0, 22, 13, 83
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/api/routes/push.py", "Python", 33, 0, 0, 0, 0, 0, -3, 1, 31
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/api/routes/query.py", "Python", 6, 0, 0, 0, 0, 0, 54, 4, 64
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/api/services/agent.py", "Python", 70, 0, 0, 0, 0, 0, 14, 14, 98
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/api/services/auth.py", "Python", 2, 0, 0, 0, 0, 0, -102, -31, -131
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/api/services/email.py", "Python", 60, 0, 0, 0, 0, 0, 51, 14, 125
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/api/services/nlp.py", "Python", 25, 0, 0, 0, 0, 0, -100, -24, -99
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/deploy/api.Dockerfile", "Docker", 0, 0, 0, 2, 0, 0, 1, 0, 3
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/docs/README.md", "Markdown", 0, -63, 0, 0, 0, 0, 0, -17, -80
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/memory_neo/cli/push.py", "Python", 18, 0, 0, 0, 0, 0, 86, 20, 124
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/memory_neo/core/extractor_js.py", "Python", 123, 0, 0, 0, 0, 0, 217, 69, 409
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/memory_neo/core/preflight.py", "Python", 163, 0, 0, 0, 0, 0, 20, 25, 208
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/memory_neo/core/scanner.py", "Python", 7, 0, 0, 0, 0, 0, 79, 17, 103
+"/Users/moustaphahoundjomacair/Documents/dev/memory-neo/requirements.txt", "pip requirements", 0, 0, 0, 0, 3, 0, 0, 0, 3
+"Total", "-", 612, 113, 29, 2, 3, -8, 346, 194, 1291

@@ -9,7 +9,7 @@ from fastapi import FastAPI, Header
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from api.routes import push, query, context, auth
+from api.routes import push, query, context, auth, nodes
 from api.services.graph import get_graph_client
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
@@ -64,6 +64,7 @@ app.include_router(auth.router,    prefix="/auth", tags=["auth"])
 app.include_router(push.router,    prefix="",      tags=["push"])
 app.include_router(query.router,   prefix="",      tags=["query"])
 app.include_router(context.router, prefix="",      tags=["context"])
+app.include_router(nodes.router,   prefix="",      tags=["nodes"])
 
 
 @app.get("/health")

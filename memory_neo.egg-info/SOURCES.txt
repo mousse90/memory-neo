@@ -17,6 +17,7 @@ memory_neo/core/__init__.py
 memory_neo/core/extractor.py
 memory_neo/core/extractor_js.py
 memory_neo/core/ignore.py
+memory_neo/core/preflight.py
 memory_neo/core/scanner.py
 memory_neo/graph/__init__.py
 memory_neo/nlp/__init__.py

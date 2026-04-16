@@ -19,7 +19,11 @@
       "Bash(DATABASE_URL=\"postgresql://postgres:bJWAQddIQN6RoPse@db.bfoyxfojbofiwxkdoshg.supabase.co:5432/postgres\" prisma db:*)",
       "Bash(npx vercel:*)",
       "Bash(memory-neo push:*)",
-      "Bash(memory-neo login:*)"
+      "Bash(memory-neo login:*)",
+      "Bash(python:*)",
+      "Bash(fly deploy:*)",
+      "Bash(npx next:*)",
+      "Bash(vercel --prod)"
     ]
   }
 }

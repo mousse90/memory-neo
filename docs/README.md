@@ -1,5 +1,7 @@
 # memory-neo/docs/README.md
+
 # Path: docs/README.md
+
 # Purpose: User-facing documentation — install, usage, deployment
 
 # 🧠 memory-neo
@@ -60,11 +62,13 @@ memory-neo push --dry-run              # scan only, don't push
 ```
 
 What gets indexed:
+
 - Files: `.py` `.js` `.jsx` `.ts` `.tsx` `.html` `.md` `.txt`
 - Python: full AST extraction — function names, line numbers, args, docstrings, code
 - Other: file name, path, content, line count
 
 Ignored by default (via `memIgnore`):
+
 - `.venv/`, `node_modules/`, `__pycache__/`, `.git/`, `*.pyc`, `.env`, and more
 
 Custom ignore: place a `memIgnore` file in your project root (same syntax as `.gitignore`).
@@ -126,87 +130,3 @@ secrets.json
 If no `memIgnore` is found in your project, the package default is used (covers most common cases).
 
 ---
-
-## Self-hosting
-
-You can run the entire backend yourself.
-
-### Requirements
-- Fly.io account
-- Supabase (or any PostgreSQL) account
-- Anthropic API key
-
-### Deploy
-
-```bash
-# 1. Deploy Memgraph
-fly deploy --config deploy/fly.memgraph.toml
-
-# 2. Create persistent volume
-fly volumes create memgraph_data --size 20 --region cdg --app memory-neo-graph
-
-# 3. Init Memgraph schema
-fly ssh console --app memory-neo-graph
-# Inside pod:
-cat /init.cypher | mgconsole
-
-# 4. Set API secrets
-fly secrets set \
-  ANTHROPIC_API_KEY=sk-ant-... \
-  DATABASE_URL=postgresql://... \
-  API_SECRET_SALT=$(openssl rand -base64 32) \
-  --app memory-neo-api
-
-# 5. Deploy API
-fly deploy --config deploy/fly.api.toml
-
-# 6. Run Prisma migrations
-fly ssh console --app memory-neo-api
-# Inside pod:
-prisma migrate deploy --schema=schema.prisma
-```
-
-### Point CLI to your instance
-
-```bash
-memory-neo login --api-url https://your-api.fly.dev
-```
-
----
-
-## Project structure
-
-```
-memory-neo/
-├── memory_neo/              ← Python package (pip install memory-neo)
-│   ├── cli/                 ← push, query, context, login commands
-│   ├── core/                ← scanner, AST extractor, ignore patterns
-│   ├── graph/               ← HTTP client to backend
-│   ├── nlp/                 ← result formatter
-│   └── utils/               ← config, display helpers
-├── api/                     ← FastAPI backend (Fly.io)
-│   ├── routes/              ← push, query, context, auth endpoints
-│   ├── services/            ← graph (Memgraph), nlp (Claude), auth
-│   └── db/                  ← schema.prisma (PostgreSQL)
-├── deploy/                  ← Dockerfiles, fly.toml configs, init.cypher
-└── docs/                    ← this file
-```
-
----
-
-## Tech stack
-
-| Layer | Technology |
-|---|---|
-| CLI package | Python + Click + Rich |
-| Backend | FastAPI on Fly.io |
-| Graph DB | Memgraph on Fly.io (Bolt protocol) |
-| Postgres | Supabase |
-| NLP engine | Claude API (claude-sonnet) |
-| Auth | API key (SHA-256 hashed) |
-
----
-
-## License
-
-MIT
