@@ -6,7 +6,9 @@ import os
 import secrets
 import hashlib
 from datetime import datetime, timezone
-from fastapi import HTTPException
+from typing import Optional
+
+from fastapi import Header, HTTPException
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 DEV_API_KEY = os.getenv("DEV_API_KEY", "local-dev-key")
@@ -91,3 +93,55 @@ async def require_valid_key(raw_key: str) -> dict:
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired API key")
     return user
+
+
+async def require_auth(
+    authorization: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> dict:
+    """
+    Coexistence auth dependency.
+
+    Order:
+      1. Authorization: Bearer <jwt>  → validated against laboria-auth
+      2. X-API-Key: <mnk_...>          → legacy path (unchanged)
+      3. Otherwise → 401
+
+    Returns a dict with a 'source' field: 'laboria-auth' or 'legacy'.
+    Does NOT modify or replace require_valid_key.
+    """
+    # 1. Bearer JWT laboria-auth (priority)
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        if not token:
+            raise HTTPException(status_code=401, detail="Empty bearer token")
+
+        # Local import to avoid any circular-import surprise.
+        from api.services.laboria_auth import validate_laboria_token
+
+        claims = await validate_laboria_token(token)
+        if claims is None:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+        return {
+            "source": "laboria-auth",
+            "sub": claims.get("sub"),
+            "email": claims.get("email"),
+            "name": claims.get("name"),
+            "plan": claims.get("plan", "free"),
+            "organizations": claims.get("organizations", []),
+            "active_org_id": claims.get("activeOrgId"),
+        }
+
+    # 2. Fallback X-API-Key legacy
+    if x_api_key:
+        user = await require_valid_key(x_api_key)
+        # validate_api_key currently returns a dict; guard for object case anyway.
+        user_fields = user if isinstance(user, dict) else getattr(user, "__dict__", {})
+        return {
+            "source": "legacy",
+            "api_key": x_api_key,
+            **user_fields,
+        }
+
+    raise HTTPException(status_code=401, detail="No authentication credentials provided")

@@ -5,11 +5,12 @@ from dotenv import load_dotenv
 import os
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env'))
 
-from fastapi import FastAPI, Header
+from fastapi import Depends, FastAPI, Header
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from api.routes import push, query, context, auth, nodes
+from api.services.auth import require_auth
 from api.services.graph import get_graph_client
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
@@ -70,6 +71,18 @@ app.include_router(nodes.router,   prefix="",      tags=["nodes"])
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "memory-neo-api", "version": "0.2.0"}
+
+
+# Pilote B1bis — coexistence Bearer JWT laboria-auth + legacy X-API-Key.
+# Bench-only endpoint; ne touche à aucun autre handler.
+@app.get("/whoami")
+async def whoami(auth: dict = Depends(require_auth)):
+    return {
+        "authenticated": True,
+        "source": auth["source"],
+        "email": auth.get("email"),
+        "details": auth,
+    }
 
 
 @app.get("/graph/{project_name}")
