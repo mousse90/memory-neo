@@ -106,6 +106,46 @@ memory-neo context main.py --copy            # copy to clipboard
 
 ---
 
+## Context API (RePTiLS multimodal recall)
+
+In addition to the code-as-graph CLI, the API exposes two endpoints that
+index and query a *parallel* multimodal graph (Episode + Activity /
+Topic / ActivityObject / Where / TimeSlot). See
+[`CONTEXT-API-SPEC.md`](./CONTEXT-API-SPEC.md) for the wire format and
+[`CONTEXT-ENDPOINTS-IMPLEMENTATION.md`](./CONTEXT-ENDPOINTS-IMPLEMENTATION.md)
+for the schema + semantics.
+
+```bash
+# Index a multimodal signature
+curl -X POST https://memory-neo-api.fly.dev/context/index \
+  -H "X-API-Key: $MN_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "episode_id": "ep-001",
+    "signature": {
+      "when": "2026-05-20T10:23:00Z",
+      "when_relative": "morning",
+      "activity": "coding",
+      "activity_object": "RePTiLS",
+      "topic_tags": ["evanescence", "compression"],
+      "where_label": "domicile"
+    }
+  }'
+
+# Query the parallel graph
+curl -X POST https://memory-neo-api.fly.dev/context/query \
+  -H "X-API-Key: $MN_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "filters": {
+      "activity": ["coding"],
+      "topic_tags": ["evanescence"]
+    },
+    "mode": "intersection",
+    "limit": 20
+  }'
+```
+
+---
+
 ## Ignore patterns (`memIgnore`)
 
 Place a `memIgnore` file in your project root to control what gets scanned.
