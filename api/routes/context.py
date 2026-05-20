@@ -1,13 +1,20 @@
 # memory-neo/api/routes/context.py
 # Path: api/routes/context.py
-# Purpose: GET /context/{target} — fetch raw code of a function or file from Memgraph
-# Called by: CLI `memory-neo context <fn_or_file>`
+# Purpose:
+#   - GET  /context/{target}  — fetch raw code of a function or file from Memgraph
+#   - POST /context/index     — index a multimodal ContextSignature (Episode + axis nodes)
+#   - POST /context/query     — query the parallel context graph by axis intersection/union
+# Called by: CLI `memory-neo context <fn_or_file>`; RePTiLS MemoryNeoClient.
+
+from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Header, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api.services.auth import require_valid_key
 from api.services.graph import fetch_context
+from api.services.context_graph import index_episode, query_episodes
 
 router = APIRouter()
 
@@ -61,3 +68,107 @@ async def context(
         )
 
     return result
+
+
+# ── POST /context/index ──────────────────────────────────────────────────────
+
+class ContextSignaturePayload(BaseModel):
+    when: datetime
+    when_relative: str | None = None
+    activity: str | None = None
+    activity_object: str | None = None
+    topic_tags: list[str] = Field(default_factory=list)
+    where_label: str | None = None
+
+
+class ContextIndexRequest(BaseModel):
+    user_id: str | None = None
+    episode_id: str
+    signature: ContextSignaturePayload
+
+
+class ContextIndexResponse(BaseModel):
+    ok: bool
+    episode_id: str
+    nodes_created: int
+    relations_created: int
+
+
+@router.post("/context/index", response_model=ContextIndexResponse)
+async def index_context(
+    body: ContextIndexRequest,
+    x_api_key: str = Header(..., alias="X-API-Key"),
+):
+    """Index a ContextSignature into the parallel multimodal graph.
+
+    Workflow:
+      1. Validate API key, resolve caller user_id.
+      2. If body.user_id is provided, enforce match with caller.
+      3. Upsert Episode + axis nodes + relations (idempotent on
+         re-index of identical payload).
+    """
+    user = await require_valid_key(x_api_key)
+
+    # Spec: user_id field is optional; if provided, must match caller.
+    if body.user_id is not None and body.user_id != user["id"]:
+        raise HTTPException(status_code=403, detail="user_id mismatch")
+
+    result = await index_episode(
+        user_id=user["id"],
+        episode_id=body.episode_id,
+        signature=body.signature.model_dump(),
+    )
+    return ContextIndexResponse(**result)
+
+
+# ── POST /context/query ──────────────────────────────────────────────────────
+
+class ContextQueryFilters(BaseModel):
+    activity: list[str] | None = None
+    topic_tags: list[str] | None = None
+    activity_object: list[str] | None = None
+    where_label: list[str] | None = None
+    when_after: datetime | None = None
+    when_before: datetime | None = None
+    when_relative: str | None = None
+
+
+class ContextQueryRequest(BaseModel):
+    user_id: str | None = None
+    filters: ContextQueryFilters = Field(default_factory=ContextQueryFilters)
+    mode: Literal["intersection", "union"] = "intersection"
+    limit: int = 50
+
+
+class ContextQueryResponse(BaseModel):
+    episode_ids: list[str]
+    count: int
+    matched_axes_per_episode: dict[str, list[str]]
+
+
+@router.post("/context/query", response_model=ContextQueryResponse)
+async def query_context(
+    body: ContextQueryRequest,
+    x_api_key: str = Header(..., alias="X-API-Key"),
+):
+    """Query the parallel context graph.
+
+    Mode:
+      - intersection: episode must match every set axis
+      - union:        episode must match at least one set axis
+
+    Results are scoped to the caller's user_id — episodes from other
+    users are never returned.
+    """
+    user = await require_valid_key(x_api_key)
+
+    if body.user_id is not None and body.user_id != user["id"]:
+        raise HTTPException(status_code=403, detail="user_id mismatch")
+
+    result = await query_episodes(
+        user_id=user["id"],
+        filters=body.filters.model_dump(),
+        mode=body.mode,
+        limit=body.limit,
+    )
+    return ContextQueryResponse(**result)
