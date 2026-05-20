@@ -28,6 +28,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"✗ Memgraph connection failed: {e}")
 
+    # Context graph schema (Episode + axis indexes — idempotent)
+    try:
+        from api.services.context_graph import init_context_schema
+        stats = init_context_schema()
+        print(f"✓ Context schema ready (indexes created={stats['indexes_created']}, skipped={stats['indexes_skipped']})")
+    except Exception as e:
+        print(f"⚠ Context schema init failed (non-fatal): {e}")
+
     # Supabase / Prisma (production only)
     if ENVIRONMENT == "production":
         try:
