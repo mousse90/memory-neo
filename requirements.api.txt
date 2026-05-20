@@ -12,3 +12,8 @@ httpx>=0.27
 pydantic[email]>=2.7
 pydantic-settings>=2.3
 passlib[bcrypt]>=1.7
+
+# Tests (optional — install with `pip install -r requirements.api.txt[test]`
+# or just `pip install pytest pytest-asyncio`)
+pytest>=8.0
+pytest-asyncio>=0.23
