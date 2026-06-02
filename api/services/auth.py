@@ -108,7 +108,11 @@ async def require_auth(
       3. Otherwise → 401
 
     Returns a dict with a 'source' field: 'laboria-auth' or 'legacy'.
-    Does NOT modify or replace require_valid_key.
+    For laboria-auth, also surfaces 'type' ("service" | "human", default
+    "human" if absent), 'scopes' (list, [] if absent), and 'org_id'
+    (claims.orgId — used by services in addition to active_org_id which
+    humans use). Revocation is handled upstream: a disabled service yields
+    {valid: false} on /validate and falls through to the 401 above.
     """
     # 1. Bearer JWT laboria-auth (priority)
     if authorization and authorization.lower().startswith("bearer "):
@@ -123,14 +127,21 @@ async def require_auth(
         if claims is None:
             raise HTTPException(status_code=401, detail="Invalid or expired token")
 
+        scopes = claims.get("scopes") or []
+        if not isinstance(scopes, list):
+            scopes = []
+
         return {
             "source": "laboria-auth",
+            "type": claims.get("type", "human"),
+            "scopes": scopes,
             "sub": claims.get("sub"),
             "email": claims.get("email"),
             "name": claims.get("name"),
             "plan": claims.get("plan", "free"),
             "organizations": claims.get("organizations", []),
             "active_org_id": claims.get("activeOrgId"),
+            "org_id": claims.get("orgId"),
         }
 
     # 2. Fallback X-API-Key legacy
@@ -145,3 +156,26 @@ async def require_auth(
         }
 
     raise HTTPException(status_code=401, detail="No authentication credentials provided")
+
+
+def require_scope(auth: dict, scope: str) -> None:
+    """Authorize an action by scope.
+
+    Dual-path semantics:
+      - laboria-auth + type=='service' → the scope MUST be in claims.scopes,
+        else 403. A revoked / unprovisioned service therefore can't act.
+      - laboria-auth + type=='human'   → auto-pass (human-authenticated user
+        retains access while scopes are being rolled out).
+      - legacy X-API-Key                → auto-pass (humans and CLI keep
+        their existing access during coexistence).
+
+    Returns None on success, raises HTTPException(403) otherwise.
+    """
+    if auth.get("source") == "laboria-auth" and auth.get("type") == "service":
+        scopes = auth.get("scopes") or []
+        if scope not in scopes:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Missing required scope: {scope}",
+            )
+    # legacy + human → no-op (coexistence)
