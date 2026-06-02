@@ -1,9 +1,12 @@
 # memory-neo/api/routes/nodes.py
 # Path: api/routes/nodes.py
-# Purpose: Ingest Memory nodes from memwar (graph bridge)
+# Purpose: Ingest Memory nodes from memwar (graph bridge) + read endpoints
+#          for lazy-load consumers (RePTiLS).
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
+
+from api.services.auth import require_auth, require_scope
 from api.services.graph import get_graph_client
 
 router = APIRouter()
@@ -28,6 +31,13 @@ class MemoryNode(BaseModel):
 
 @router.post("/nodes")
 async def create_node(node: MemoryNode):
+    """⚠️ Intentionally OPEN (no auth).
+
+    dogydoc writes here without credentials. Closing this endpoint will
+    silently break ingestion until svc_dogydoc is provisioned upstream
+    and dogydoc is updated to send a Bearer token. Handled in a separate
+    sprint.
+    """
     driver = get_graph_client()
     try:
         with driver.session() as session:
@@ -59,14 +69,69 @@ async def create_node(node: MemoryNode):
     return {"status": "created", "id": node.id}
 
 
-@router.get("/nodes/{user_id}")
-async def get_nodes(user_id: str):
+# ── Read endpoints ───────────────────────────────────────────────────────────
+#
+# Routing note: GET /nodes/by-ids MUST be declared before GET /nodes/{user_id}
+# — otherwise FastAPI matches "by-ids" as the path parameter `user_id`.
+
+@router.get("/nodes/by-ids")
+async def get_nodes_by_ids(
+    ids: str = Query(..., description="Comma-separated Memory node ids"),
+    user_id: str = Query(..., description="Owner user_id — data scope filter"),
+    auth: dict = Depends(require_auth),
+):
+    """Read a batch of Memory nodes by id, scoped to `user_id`.
+
+    On-behalf-of semantics: the scope `memory-neo:nodes:read` authorizes
+    the ACTION; the `user_id` query param picks the data scope. Memory
+    nodes not owned by `user_id` are filtered out silently — the
+    response includes only the ids that exist AND belong to `user_id`.
+    """
+    require_scope(auth, "memory-neo:nodes:read")
+
+    id_list = [s.strip() for s in ids.split(",") if s.strip()]
+    if not id_list:
+        return {"nodes": [], "count": 0}
+
     driver = get_graph_client()
     try:
         with driver.session() as session:
             result = session.run(
                 """
-                MATCH (u:User {id: $user_id})-[:HAS_MEMORY]->(m:Memory)
+                MATCH (u:User {id: $user_id})-[:HAS_MEMORY]->(m:`Memory`)
+                WHERE m.id IN $ids
+                RETURN m.id AS id, m.content AS content,
+                       m.memory_type AS memory_type, m.app_id AS app_id,
+                       m.user_id AS user_id, m.tags AS tags,
+                       m.created_at AS created_at
+                """,
+                user_id=user_id, ids=id_list,
+            )
+            nodes = [dict(record) for record in result]
+    finally:
+        driver.close()
+
+    return {"nodes": nodes, "count": len(nodes)}
+
+
+@router.get("/nodes/{user_id}")
+async def get_nodes(
+    user_id: str,
+    auth: dict = Depends(require_auth),
+):
+    """Read all Memory nodes for `user_id`, most recent first.
+
+    On-behalf-of semantics: scope `memory-neo:nodes:read` authorizes the
+    ACTION; the path parameter `user_id` picks the data scope.
+    """
+    require_scope(auth, "memory-neo:nodes:read")
+
+    driver = get_graph_client()
+    try:
+        with driver.session() as session:
+            result = session.run(
+                """
+                MATCH (u:User {id: $user_id})-[:HAS_MEMORY]->(m:`Memory`)
                 RETURN m.id AS id, m.content AS content,
                        m.memory_type AS memory_type, m.app_id AS app_id,
                        m.user_id AS user_id, m.tags AS tags,
