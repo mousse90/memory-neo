@@ -91,8 +91,17 @@ async def index_episode(
     user_id: str,
     episode_id: str,
     signature: dict,
+    tenant_id: str | None = None,
 ) -> dict:
     """Upsert an Episode + axis nodes + relations.
+
+    `user_id` is the scope key — the principal identity that owns the
+    episode. Legacy callers pass User.id; service callers pass claims.sub.
+    Episodes written under different principals live in disjoint scopes.
+
+    `tenant_id` is optional and only persisted on the Episode (as
+    `scope_tenant_id`) for forensic/multi-tenant queries; isolation
+    still goes through `scope_user_id`.
 
     `signature` keys (all optional except `when`):
       - when           : datetime | str
@@ -118,12 +127,15 @@ async def index_episode(
             row = session.run(
                 """
                 MERGE (e:Episode {id: $id, scope_user_id: $uid})
-                ON CREATE SET e.when = $when, e._created = true
+                ON CREATE SET e.when = $when,
+                              e.scope_tenant_id = $tenant,
+                              e._created = true
                 ON MATCH  SET e.when = coalesce($when, e.when),
+                              e.scope_tenant_id = coalesce($tenant, e.scope_tenant_id),
                               e._created = false
                 RETURN e._created AS created
                 """,
-                id=episode_id, uid=user_id, when=when_iso,
+                id=episode_id, uid=user_id, when=when_iso, tenant=tenant_id,
             ).single()
             if row and row["created"]:
                 nodes_created += 1

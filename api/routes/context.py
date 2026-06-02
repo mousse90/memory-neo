@@ -9,12 +9,27 @@
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Header, Query
+from fastapi import APIRouter, Depends, HTTPException, Header, Query
 from pydantic import BaseModel, Field
 
-from api.services.auth import require_valid_key
+from api.services.auth import require_auth, require_scope, require_valid_key
 from api.services.graph import fetch_context
 from api.services.context_graph import index_episode, query_episodes
+
+
+def _resolve_scope(auth: dict) -> tuple[str, str | None]:
+    """Return (scope_user_id, scope_tenant_id) for the authenticated caller.
+
+    Mapping per auth source (used as the Memgraph `scope_user_id`):
+      - laboria-auth + service : (claims.sub, claims.orgId)
+      - laboria-auth + human   : (claims.sub, None)
+      - legacy X-API-Key       : (User.id,   None)   — unchanged
+    """
+    if auth.get("source") == "laboria-auth":
+        tenant = auth.get("org_id") if auth.get("type") == "service" else None
+        return auth["sub"], tenant
+    # legacy → Prisma User.id
+    return auth["id"], None
 
 router = APIRouter()
 
@@ -97,26 +112,35 @@ class ContextIndexResponse(BaseModel):
 @router.post("/context/index", response_model=ContextIndexResponse)
 async def index_context(
     body: ContextIndexRequest,
-    x_api_key: str = Header(..., alias="X-API-Key"),
+    auth: dict = Depends(require_auth),
 ):
     """Index a ContextSignature into the parallel multimodal graph.
 
     Workflow:
-      1. Validate API key, resolve caller user_id.
-      2. If body.user_id is provided, enforce match with caller.
-      3. Upsert Episode + axis nodes + relations (idempotent on
-         re-index of identical payload).
+      1. Authenticate via Bearer JWT (laboria-auth) or X-API-Key (legacy).
+      2. Require scope `memory-neo:episodes:write` for service principals.
+      3. Resolve scope (legacy → User.id, laboria-auth → claims.sub).
+      4. If body.user_id is provided AND caller is legacy, enforce match.
+      5. Upsert Episode + axis nodes + relations (idempotent).
     """
-    user = await require_valid_key(x_api_key)
+    require_scope(auth, "memory-neo:episodes:write")
+    scope_uid, scope_tenant = _resolve_scope(auth)
 
-    # Spec: user_id field is optional; if provided, must match caller.
-    if body.user_id is not None and body.user_id != user["id"]:
+    # Preserve the legacy contract: a legacy caller passing a user_id
+    # that doesn't match its own User.id is rejected. Service callers
+    # write under their sub regardless of body.user_id.
+    if (
+        auth.get("source") == "legacy"
+        and body.user_id is not None
+        and body.user_id != scope_uid
+    ):
         raise HTTPException(status_code=403, detail="user_id mismatch")
 
     result = await index_episode(
-        user_id=user["id"],
+        user_id=scope_uid,
         episode_id=body.episode_id,
         signature=body.signature.model_dump(),
+        tenant_id=scope_tenant,
     )
     return ContextIndexResponse(**result)
 
@@ -149,7 +173,7 @@ class ContextQueryResponse(BaseModel):
 @router.post("/context/query", response_model=ContextQueryResponse)
 async def query_context(
     body: ContextQueryRequest,
-    x_api_key: str = Header(..., alias="X-API-Key"),
+    auth: dict = Depends(require_auth),
 ):
     """Query the parallel context graph.
 
@@ -157,16 +181,22 @@ async def query_context(
       - intersection: episode must match every set axis
       - union:        episode must match at least one set axis
 
-    Results are scoped to the caller's user_id — episodes from other
-    users are never returned.
+    Results are scoped to the caller's principal (User.id for legacy,
+    claims.sub for laboria-auth). Episodes written under a different
+    principal are never returned.
     """
-    user = await require_valid_key(x_api_key)
+    require_scope(auth, "memory-neo:episodes:read")
+    scope_uid, _ = _resolve_scope(auth)
 
-    if body.user_id is not None and body.user_id != user["id"]:
+    if (
+        auth.get("source") == "legacy"
+        and body.user_id is not None
+        and body.user_id != scope_uid
+    ):
         raise HTTPException(status_code=403, detail="user_id mismatch")
 
     result = await query_episodes(
-        user_id=user["id"],
+        user_id=scope_uid,
         filters=body.filters.model_dump(),
         mode=body.mode,
         limit=body.limit,
