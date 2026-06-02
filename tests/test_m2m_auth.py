@@ -1,0 +1,398 @@
+# memory-neo/tests/test_m2m_auth.py
+# Path: tests/test_m2m_auth.py
+# Purpose: Integration tests for the laboria-auth M2M service path on
+#          /context/index, /context/query, /nodes/{user_id}, /nodes/by-ids.
+#
+# Strategy: monkeypatch validate_laboria_token to return controlled claims
+# (type, scopes, sub, orgId) so we don't need a real upstream JWT in local.
+# These tests need Memgraph (asserted live by hitting the endpoints).
+
+from datetime import datetime, timezone
+
+import pytest
+
+
+SERVICE_SUB = "svc_reptils_test"
+SERVICE_ORG = "org_laboria"
+LEGACY_UID = "usr_test"            # matches DEV_USER_ID in conftest.py
+OTHER_LEGACY_UID = "usr_test_other"
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _bearer(token: str = "fake-bearer-token") -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _patch_service(monkeypatch, *, scopes, sub=SERVICE_SUB, org_id=SERVICE_ORG):
+    """Make validate_laboria_token return a service principal with `scopes`."""
+    async def fake(token):
+        return {
+            "sub": sub,
+            "type": "service",
+            "scopes": list(scopes),
+            "orgId": org_id,
+        }
+    # Patch the source module — auth.require_auth re-imports it each call.
+    monkeypatch.setattr(
+        "api.services.laboria_auth.validate_laboria_token", fake
+    )
+    # Also clear the laboria_auth in-memory cache so the patch wins.
+    from api.services import laboria_auth
+    laboria_auth._cache.clear()
+
+
+def _patch_human(monkeypatch, *, sub="usr_human_jwt"):
+    """Make validate_laboria_token return a human principal (no scopes)."""
+    async def fake(token):
+        return {
+            "sub": sub,
+            "type": "human",
+            "email": "human@example.com",
+        }
+    monkeypatch.setattr(
+        "api.services.laboria_auth.validate_laboria_token", fake
+    )
+    from api.services import laboria_auth
+    laboria_auth._cache.clear()
+
+
+def _sig(**overrides) -> dict:
+    base = {
+        "when": datetime(2026, 5, 20, 10, 23, tzinfo=timezone.utc).isoformat(),
+        "when_relative": "morning",
+        "activity": "coding",
+        "activity_object": "RePTiLS",
+        "topic_tags": ["evanescence", "compression"],
+        "where_label": "domicile",
+    }
+    base.update(overrides)
+    return base
+
+
+# ── conftest extension — clean up service-scoped data after each test ───────
+
+@pytest.fixture(autouse=True)
+def cleanup_service_scope(memgraph_available):
+    yield
+    if not memgraph_available:
+        return
+    from api.services.graph import get_graph_client
+    driver = get_graph_client()
+    try:
+        with driver.session() as session:
+            session.run(
+                """
+                MATCH (n)
+                WHERE n.scope_user_id = $uid
+                  AND (n:Episode OR n:Activity OR n:Topic
+                       OR n:ActivityObject OR n:Where OR n:TimeSlot)
+                DETACH DELETE n
+                """,
+                uid=SERVICE_SUB,
+            )
+            # Also clean Memory nodes created during by-ids / nodes tests
+            session.run(
+                """
+                MATCH (u:User)-[:HAS_MEMORY]->(m:`Memory`)
+                WHERE u.id IN ['usr_m2m_nodes_test_a', 'usr_m2m_nodes_test_b']
+                DETACH DELETE m, u
+                """
+            )
+    finally:
+        driver.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. /context/index — service path
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_index_service_with_scope_writes_under_sub(client, monkeypatch):
+    _patch_service(monkeypatch, scopes=["memory-neo:episodes:write"])
+
+    eid = "ep-svc-write-1"
+    r = client.post(
+        "/context/index",
+        headers=_bearer(),
+        json={"episode_id": eid, "signature": _sig()},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["episode_id"] == eid
+
+    # Verify the Episode is scoped under the service sub, not under any User.id.
+    from api.services.graph import get_graph_client
+    driver = get_graph_client()
+    try:
+        with driver.session() as session:
+            row = session.run(
+                "MATCH (e:Episode {id: $id}) "
+                "RETURN e.scope_user_id AS sid, e.scope_tenant_id AS tid",
+                id=eid,
+            ).single()
+    finally:
+        driver.close()
+    assert row is not None
+    assert row["sid"] == SERVICE_SUB
+    assert row["tid"] == SERVICE_ORG
+
+
+def test_index_service_missing_scope_returns_403(client, monkeypatch):
+    # Service has nodes:read but NOT episodes:write
+    _patch_service(monkeypatch, scopes=["memory-neo:nodes:read"])
+
+    r = client.post(
+        "/context/index",
+        headers=_bearer(),
+        json={"episode_id": "ep-no-scope", "signature": _sig()},
+    )
+    assert r.status_code == 403, r.text
+    assert "memory-neo:episodes:write" in r.json()["detail"]
+
+
+def test_index_service_invalid_token_returns_401(client, monkeypatch):
+    async def fake(token):
+        return None  # upstream says invalid/revoked
+    monkeypatch.setattr(
+        "api.services.laboria_auth.validate_laboria_token", fake
+    )
+    from api.services import laboria_auth
+    laboria_auth._cache.clear()
+
+    r = client.post(
+        "/context/index",
+        headers=_bearer(),
+        json={"episode_id": "ep-revoked", "signature": _sig()},
+    )
+    assert r.status_code == 401
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. /context/query — service path + isolation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_query_service_scope_required(client, monkeypatch):
+    _patch_service(monkeypatch, scopes=["memory-neo:episodes:write"])  # not read
+
+    r = client.post(
+        "/context/query",
+        headers=_bearer(),
+        json={"filters": {}},
+    )
+    assert r.status_code == 403
+    assert "memory-neo:episodes:read" in r.json()["detail"]
+
+
+def test_query_service_isolation_from_legacy(
+    client, headers, monkeypatch,
+):
+    """Episodes a service writes are not visible to a legacy caller, and
+    legacy episodes are not visible to the service query."""
+    # 1. Service writes ep-svc-iso-1
+    _patch_service(
+        monkeypatch,
+        scopes=["memory-neo:episodes:write", "memory-neo:episodes:read"],
+    )
+    r1 = client.post(
+        "/context/index",
+        headers=_bearer(),
+        json={"episode_id": "ep-svc-iso-1", "signature": _sig(activity="coding")},
+    )
+    assert r1.status_code == 200, r1.text
+
+    # 2. Legacy writes ep-legacy-iso-1 (different user, different scope)
+    r2 = client.post(
+        "/context/index",
+        headers=headers,
+        json={"episode_id": "ep-legacy-iso-1", "signature": _sig(activity="coding")},
+    )
+    assert r2.status_code == 200, r2.text
+
+    # 3. Service query for activity=coding sees only its own episode
+    r3 = client.post(
+        "/context/query",
+        headers=_bearer(),
+        json={"filters": {"activity": ["coding"]}},
+    )
+    assert r3.status_code == 200, r3.text
+    eids = set(r3.json()["episode_ids"])
+    assert "ep-svc-iso-1" in eids
+    assert "ep-legacy-iso-1" not in eids
+
+    # 4. Legacy query for activity=coding sees only its own episode
+    r4 = client.post(
+        "/context/query",
+        headers=headers,
+        json={"filters": {"activity": ["coding"]}},
+    )
+    assert r4.status_code == 200, r4.text
+    eids = set(r4.json()["episode_ids"])
+    assert "ep-legacy-iso-1" in eids
+    assert "ep-svc-iso-1" not in eids
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. /nodes/{user_id} + /nodes/by-ids — service path
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _seed_memory(user_id: str, node_id: str, content: str = "hello") -> None:
+    """Insert one Memory node owned by user_id directly (bypassing POST /nodes
+    which would also work but we test the read path in isolation).
+
+    Note: `Memory` is backtick-escaped because newer Memgraph builds treat
+    it as a reserved keyword. The label is identical with or without the
+    backticks — older versions accept both."""
+    from api.services.graph import get_graph_client
+    driver = get_graph_client()
+    try:
+        with driver.session() as session:
+            session.run(
+                """
+                MERGE (u:User {id: $uid})
+                CREATE (m:`Memory` {
+                    id: $id, content: $c, memory_type: 'context',
+                    app_id: 'test', user_id: $uid, tags: [],
+                    created_at: $ts
+                })
+                CREATE (u)-[:HAS_MEMORY]->(m)
+                """,
+                uid=user_id, id=node_id, c=content,
+                ts=datetime.now(timezone.utc).isoformat(),
+            )
+    finally:
+        driver.close()
+
+
+def test_nodes_user_id_service_with_scope(client, monkeypatch):
+    _patch_service(monkeypatch, scopes=["memory-neo:nodes:read"])
+
+    _seed_memory("usr_m2m_nodes_test_a", "node-a-1", "alpha")
+    _seed_memory("usr_m2m_nodes_test_a", "node-a-2", "beta")
+
+    r = client.get("/nodes/usr_m2m_nodes_test_a", headers=_bearer())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    ids = {n["id"] for n in body["nodes"]}
+    assert ids == {"node-a-1", "node-a-2"}
+    assert body["count"] == 2
+
+
+def test_nodes_user_id_service_missing_scope_returns_403(client, monkeypatch):
+    _patch_service(monkeypatch, scopes=["memory-neo:episodes:read"])  # not nodes:read
+
+    r = client.get("/nodes/usr_m2m_nodes_test_a", headers=_bearer())
+    assert r.status_code == 403
+    assert "memory-neo:nodes:read" in r.json()["detail"]
+
+
+def test_nodes_user_id_unauthenticated_returns_401(client):
+    # No header at all — previously open, now closed.
+    r = client.get("/nodes/usr_m2m_nodes_test_a")
+    assert r.status_code == 401
+
+
+def test_nodes_by_ids_filters_by_user_id(client, monkeypatch):
+    _patch_service(monkeypatch, scopes=["memory-neo:nodes:read"])
+
+    _seed_memory("usr_m2m_nodes_test_a", "node-mix-1", "owned-by-a")
+    _seed_memory("usr_m2m_nodes_test_b", "node-mix-2", "owned-by-b")
+
+    # Ask for both ids but scoped to user A — only node-mix-1 should come back.
+    r = client.get(
+        "/nodes/by-ids",
+        headers=_bearer(),
+        params={"ids": "node-mix-1,node-mix-2", "user_id": "usr_m2m_nodes_test_a"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    ids = {n["id"] for n in body["nodes"]}
+    assert ids == {"node-mix-1"}
+    assert body["count"] == 1
+
+
+def test_nodes_by_ids_unknown_id_skipped(client, monkeypatch):
+    _patch_service(monkeypatch, scopes=["memory-neo:nodes:read"])
+
+    _seed_memory("usr_m2m_nodes_test_a", "node-real", "exists")
+
+    r = client.get(
+        "/nodes/by-ids",
+        headers=_bearer(),
+        params={"ids": "node-real,does-not-exist", "user_id": "usr_m2m_nodes_test_a"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert {n["id"] for n in body["nodes"]} == {"node-real"}
+    assert body["count"] == 1
+
+
+def test_nodes_by_ids_empty_ids_returns_empty(client, monkeypatch):
+    _patch_service(monkeypatch, scopes=["memory-neo:nodes:read"])
+
+    r = client.get(
+        "/nodes/by-ids",
+        headers=_bearer(),
+        params={"ids": "", "user_id": "usr_m2m_nodes_test_a"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"nodes": [], "count": 0}
+
+
+def test_nodes_by_ids_routing_not_captured_as_user_id(client, monkeypatch):
+    """Regression guard: GET /nodes/by-ids must not be matched by
+    GET /nodes/{user_id} (which would treat 'by-ids' as a user_id)."""
+    _patch_service(monkeypatch, scopes=["memory-neo:nodes:read"])
+
+    # If routing were wrong, this would return a {nodes, count} for
+    # user_id='by-ids' AND ignore the ids query param. We instead expect
+    # the by-ids handler to use the ids param (here empty → empty).
+    r = client.get(
+        "/nodes/by-ids",
+        headers=_bearer(),
+        params={"user_id": "usr_m2m_nodes_test_a"},  # 'ids' missing → 422
+    )
+    # Missing required 'ids' on by-ids handler → 422 from FastAPI validation.
+    # If routing were wrong (matched as /nodes/{user_id='by-ids'}), we'd get 200.
+    assert r.status_code == 422
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Human laboria-auth — auto-pass (no scope required)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_human_laboria_auth_passes_without_scopes(client, monkeypatch):
+    _patch_human(monkeypatch, sub="usr_human_jwt_pass")
+
+    r = client.post(
+        "/context/query",
+        headers=_bearer(),
+        json={"filters": {}},
+    )
+    # No scopes required for humans (coexistence). Should be 200 with empty
+    # result (no episodes under that sub yet).
+    assert r.status_code == 200, r.text
+    assert r.json()["count"] == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. POST /nodes stays OPEN (intentional)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_post_nodes_auth_gate_remains_open(client):
+    """Sanity: POST /nodes must NOT reject an unauthenticated caller at
+    the auth layer. dogydoc depends on this until svc_dogydoc is
+    provisioned upstream.
+
+    We assert the auth gate by sending an INVALID body with no auth
+    headers and expecting Pydantic 422 (validation), NOT 401 or 403.
+    A 422 proves the request reached the handler — the auth middleware
+    let it through. We avoid asserting a successful write because the
+    local Memgraph image treats `Memory` as a reserved keyword (the
+    existing :Memory Cypher in POST /nodes works in prod but not here),
+    and per the recâblage instructions we are not modifying the POST
+    write path in this sprint.
+    """
+    r = client.post("/nodes", json={"id": "x"})  # missing required fields
+    assert r.status_code == 422, r.text
+    # Negative: must NOT be auth-gated
+    assert r.status_code != 401
+    assert r.status_code != 403

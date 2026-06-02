@@ -111,6 +111,11 @@ def pytest_collection_modifyitems(config, items):
 
     skip_marker = pytest.mark.skip(reason="Memgraph not reachable on bolt://127.0.0.1:7687")
     # Only auto-skip integration tests — unit tests stay runnable.
+    integration_files = (
+        "test_context_index.py",
+        "test_context_query.py",
+        "test_m2m_auth.py",
+    )
     for item in items:
-        if "test_context_index.py" in item.nodeid or "test_context_query.py" in item.nodeid:
+        if any(name in item.nodeid for name in integration_files):
             item.add_marker(skip_marker)
