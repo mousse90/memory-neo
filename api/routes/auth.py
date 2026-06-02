@@ -1,143 +1,84 @@
-# memory-neo/api/routes/auth.py
-# Path: api/routes/auth.py
-
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel, EmailStr
-
-from api.services.auth import create_user_with_key, validate_api_key, require_valid_key
-from api.services.email import send_welcome_email, send_key_reminder
+from api.services.otp import generate_otp, verify_otp, send_otp_email, generate_api_key
+from api.services.auth import validate_api_key
 
 router = APIRouter()
 
-
-class RegisterRequest(BaseModel):
+class SendCodeRequest(BaseModel):
     email: EmailStr
 
+@router.post("/send-code")
+async def send_code(body: SendCodeRequest):
+    code = generate_otp(body.email)
+    sent = await send_otp_email(body.email, code)
+    if not sent:
+        raise HTTPException(status_code=500, detail="Failed to send code")
+    return {"message": "Code sent", "email": body.email}
 
-class RegisterResponse(BaseModel):
-    user_id:  str
-    email:    str
-    api_key:  str
+class VerifyCodeRequest(BaseModel):
+    email: EmailStr
+    code: str
 
-
-@router.post("/register", response_model=RegisterResponse)
-async def register(body: RegisterRequest):
-    """Create account + send API key by email via Resend."""
-    result = await create_user_with_key(body.email)
-
-    # Send welcome email non-blocking
-    await send_welcome_email(
-        to=result["email"],
-        api_key=result["api_key"],
-        user_id=result["user_id"],
-    )
-
-    return result
-
-
-class ValidateResponse(BaseModel):
-    user_id: str
-    email:   str
-
+@router.post("/verify-code")
+async def verify_code(body: VerifyCodeRequest):
+    if not verify_otp(body.email, body.code):
+        raise HTTPException(status_code=401, detail="Invalid or expired code")
+    from api.db.prisma import get_db
+    db = await get_db()
+    user = await db.user.find_unique(where={"email": body.email}, include={"apiKeys": True})
+    if user:
+        raw_key, hashed_key = generate_api_key()
+        if user.apiKeys:
+            await db.apikey.update(where={"id": user.apiKeys[0].id}, data={"key": hashed_key})
+        else:
+            await db.apikey.create(data={"key": hashed_key, "userId": user.id})
+        return {"user_id": user.id, "email": user.email, "api_key": raw_key}
+    raw_key, hashed_key = generate_api_key()
+    new_user = await db.user.create(data={"email": body.email})
+    await db.apikey.create(data={"key": hashed_key, "userId": new_user.id})
+    return {"user_id": new_user.id, "email": new_user.email, "api_key": raw_key}
 
 @router.post("/validate")
 async def validate(x_api_key: str = Header(..., alias="X-API-Key")):
-    """Validate API key — called by CLI login."""
     user = await validate_api_key(x_api_key)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid API key")
     return {"user_id": user["id"], "email": user["email"]}
 
-
-class ForgotRequest(BaseModel):
-    email: EmailStr
-
-
-@router.post("/forgot-key")
-async def forgot_key(body: ForgotRequest):
-    """
-    Send API key reminder by email.
-    Security: only sends if email exists — doesn't reveal if it doesn't.
-    """
-    import os
-    if os.getenv("ENVIRONMENT", "development") == "development":
-        raise HTTPException(status_code=501, detail="Not available in dev mode")
-
+@router.post("/regenerate-key")
+async def regenerate_key(x_api_key: str = Header(..., alias="X-API-Key")):
+    """Invalidate the caller's current API key and issue a fresh one."""
+    user = await validate_api_key(x_api_key)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid API key")
     from api.db.prisma import get_db
     db = await get_db()
-
-    user = await db.user.find_unique(
-        where={"email": body.email},
-        include={"apiKeys": True},
+    db_user = await db.user.find_unique(
+        where={"email": user["email"]}, include={"apiKeys": True}
     )
-
-    if user and user.apiKeys:
-        # We can't send the plaintext key (we only store hashes)
-        # So we generate a new key and update the record
-        import secrets, hashlib, os
-        raw_key = "mnk_" + secrets.token_urlsafe(40)
-        salt    = os.getenv("API_SECRET_SALT", "default_salt_change_me")
-        hashed  = hashlib.sha256(f"{salt}{raw_key}".encode()).hexdigest()
-
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    raw_key, hashed_key = generate_api_key()
+    if db_user.apiKeys:
         await db.apikey.update(
-            where={"id": user.apiKeys[0].id},
-            data={"key": hashed},
+            where={"id": db_user.apiKeys[0].id}, data={"key": hashed_key}
         )
-        await send_key_reminder(to=body.email, api_key=raw_key)
+    else:
+        await db.apikey.create(data={"key": hashed_key, "userId": db_user.id})
+    return {"user_id": db_user.id, "email": db_user.email, "api_key": raw_key}
 
-    # Always return 200 — don't reveal if email exists
-    return {"message": "If this email is registered, you'll receive your key shortly."}
+class RegisterRequest(BaseModel):
+    email: EmailStr
 
-# # memory-neo/api/routes/auth.py
-# # Path: api/routes/auth.py
-# # Purpose: Auth endpoints — register user, validate API key
-# # Used by: CLI `memory-neo login` → POST /auth/validate
-
-# from fastapi import APIRouter, HTTPException, Header
-# from pydantic import BaseModel, EmailStr
-
-# from api.services.auth import (
-#     create_user_with_key,
-#     validate_api_key,
-# )
-
-# router = APIRouter()
-
-
-# class RegisterRequest(BaseModel):
-#     email: EmailStr
-
-
-# class RegisterResponse(BaseModel):
-#     user_id: str
-#     email: str
-#     api_key: str          # shown once — user must save it
-
-
-# @router.post("/register", response_model=RegisterResponse)
-# async def register(body: RegisterRequest):
-#     """
-#     Create a new user and return their API key.
-#     The key is shown once — not stored in plaintext.
-
-#     Called by: web UI signup flow (future)
-#     """
-#     result = await create_user_with_key(body.email)
-#     return result
-
-
-# class ValidateResponse(BaseModel):
-#     user_id: str
-#     email: str
-
-
-# @router.post("/validate")
-# async def validate(x_api_key: str = Header(..., alias="X-API-Key")):
-#     """
-#     Validate an API key and return user info.
-#     Called by: CLI `memory-neo login`
-#     """
-#     user = await validate_api_key(x_api_key)
-#     if not user:
-#         raise HTTPException(status_code=401, detail="Invalid API key")
-#     return {"user_id": user["id"], "email": user["email"]}
+@router.post("/register")
+async def register(body: RegisterRequest):
+    from api.db.prisma import get_db
+    db = await get_db()
+    existing = await db.user.find_unique(where={"email": body.email})
+    if existing:
+        raise HTTPException(status_code=409, detail="Email already registered")
+    raw_key, hashed_key = generate_api_key()
+    user = await db.user.create(data={"email": body.email})
+    await db.apikey.create(data={"key": hashed_key, "userId": user.id})
+    return {"user_id": user.id, "email": user.email, "api_key": raw_key}
