@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="memory-neo API",
     description="Push codebase structure to Memgraph, query with natural language.",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -78,7 +78,7 @@ app.include_router(nodes.router,   prefix="",      tags=["nodes"])
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "memory-neo-api", "version": "0.2.0"}
+    return {"status": "ok", "service": "memory-neo-api", "version": "0.3.0"}
 
 
 # Pilote B1bis — coexistence Bearer JWT laboria-auth + legacy X-API-Key.

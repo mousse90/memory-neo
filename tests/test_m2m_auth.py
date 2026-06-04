@@ -72,6 +72,14 @@ def _sig(**overrides) -> dict:
 
 # ── conftest extension — clean up service-scoped data after each test ───────
 
+# User ids used as Memory owners across the node-read tests.
+NODE_OWNERS = [
+    SERVICE_SUB,            # service principal reads its OWN nodes (sub == owner)
+    LEGACY_UID,            # legacy X-API-Key holder (usr_test) self-read
+    "usr_other_owner",     # a different principal — leak guard
+]
+
+
 @pytest.fixture(autouse=True)
 def cleanup_service_scope(memgraph_available):
     yield
@@ -91,13 +99,18 @@ def cleanup_service_scope(memgraph_available):
                 """,
                 uid=SERVICE_SUB,
             )
-            # Also clean Memory nodes created during by-ids / nodes tests
+            # Clean Memory nodes created by the node-read tests. We delete
+            # only the Memory (not the User): owner Users are re-created via
+            # MERGE on the next seed, and this Memgraph build rejects the
+            # `NOT (u)-[:HAS_MEMORY]->()` pattern predicate needed to prune
+            # orphan Users. Orphans are harmless — reads match by edge.
             session.run(
                 """
                 MATCH (u:User)-[:HAS_MEMORY]->(m:`Memory`)
-                WHERE u.id IN ['usr_m2m_nodes_test_a', 'usr_m2m_nodes_test_b']
-                DETACH DELETE m, u
-                """
+                WHERE u.id IN $owners
+                DETACH DELETE m
+                """,
+                owners=NODE_OWNERS,
             )
     finally:
         driver.close()
@@ -262,13 +275,14 @@ def _seed_memory(user_id: str, node_id: str, content: str = "hello") -> None:
         driver.close()
 
 
-def test_nodes_user_id_service_with_scope(client, monkeypatch):
+def test_nodes_list_service_reads_own_sub(client, monkeypatch):
+    """A service lists ITS OWN nodes (path user_id == claims.sub)."""
     _patch_service(monkeypatch, scopes=["memory-neo:nodes:read"])
 
-    _seed_memory("usr_m2m_nodes_test_a", "node-a-1", "alpha")
-    _seed_memory("usr_m2m_nodes_test_a", "node-a-2", "beta")
+    _seed_memory(SERVICE_SUB, "node-a-1", "alpha")
+    _seed_memory(SERVICE_SUB, "node-a-2", "beta")
 
-    r = client.get("/nodes/usr_m2m_nodes_test_a", headers=_bearer())
+    r = client.get(f"/nodes/{SERVICE_SUB}", headers=_bearer())
     assert r.status_code == 200, r.text
     body = r.json()
     ids = {n["id"] for n in body["nodes"]}
@@ -276,48 +290,98 @@ def test_nodes_user_id_service_with_scope(client, monkeypatch):
     assert body["count"] == 2
 
 
-def test_nodes_user_id_service_missing_scope_returns_403(client, monkeypatch):
+def test_nodes_list_other_user_id_returns_403(client, monkeypatch):
+    """Identity is derived from the key: listing another principal's nodes
+    by putting their id in the path is rejected — never a data leak."""
+    _patch_service(monkeypatch, scopes=["memory-neo:nodes:read"])
+
+    _seed_memory("usr_other_owner", "node-secret", "not yours")
+
+    r = client.get("/nodes/usr_other_owner", headers=_bearer())
+    assert r.status_code == 403
+    assert "mismatch" in r.json()["detail"]
+
+
+def test_nodes_list_missing_scope_returns_403(client, monkeypatch):
     _patch_service(monkeypatch, scopes=["memory-neo:episodes:read"])  # not nodes:read
 
-    r = client.get("/nodes/usr_m2m_nodes_test_a", headers=_bearer())
+    r = client.get(f"/nodes/{SERVICE_SUB}", headers=_bearer())
     assert r.status_code == 403
     assert "memory-neo:nodes:read" in r.json()["detail"]
 
 
-def test_nodes_user_id_unauthenticated_returns_401(client):
+def test_nodes_list_unauthenticated_returns_401(client):
     # No header at all — previously open, now closed.
-    r = client.get("/nodes/usr_m2m_nodes_test_a")
+    r = client.get(f"/nodes/{SERVICE_SUB}")
     assert r.status_code == 401
 
 
-def test_nodes_by_ids_filters_by_user_id(client, monkeypatch):
+def test_nodes_by_ids_scoped_to_caller_never_leaks(client, monkeypatch):
+    """by-ids returns ONLY the caller's nodes — an id owned by another
+    principal is silently filtered out even when explicitly requested."""
     _patch_service(monkeypatch, scopes=["memory-neo:nodes:read"])
 
-    _seed_memory("usr_m2m_nodes_test_a", "node-mix-1", "owned-by-a")
-    _seed_memory("usr_m2m_nodes_test_b", "node-mix-2", "owned-by-b")
+    _seed_memory(SERVICE_SUB, "node-mix-1", "owned-by-caller")
+    _seed_memory("usr_other_owner", "node-mix-2", "owned-by-someone-else")
 
-    # Ask for both ids but scoped to user A — only node-mix-1 should come back.
+    # Ask for both ids — only the caller's own node may come back.
     r = client.get(
         "/nodes/by-ids",
         headers=_bearer(),
-        params={"ids": "node-mix-1,node-mix-2", "user_id": "usr_m2m_nodes_test_a"},
+        params={"ids": "node-mix-1,node-mix-2"},
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    ids = {n["id"] for n in body["nodes"]}
-    assert ids == {"node-mix-1"}
+    assert {n["id"] for n in body["nodes"]} == {"node-mix-1"}
     assert body["count"] == 1
+
+
+def test_nodes_by_ids_legacy_key_reads_own_nodes(client, headers):
+    """Done-criterion path: a legacy X-API-Key holder re-reads its OWN
+    nodes (owner derived from the key == DEV_USER_ID == usr_test)."""
+    _seed_memory(LEGACY_UID, "node-leg-1", "mine")
+    _seed_memory(LEGACY_UID, "node-leg-2", "also mine")
+    _seed_memory("usr_other_owner", "node-leg-other", "theirs")
+
+    r = client.get(
+        "/nodes/by-ids",
+        headers=headers,  # X-API-Key
+        params={"ids": "node-leg-1,node-leg-2,node-leg-other"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert {n["id"] for n in body["nodes"]} == {"node-leg-1", "node-leg-2"}
+    assert body["count"] == 2
+
+
+def test_nodes_by_ids_stray_user_id_param_is_ignored(client, monkeypatch):
+    """Backward-compat: an old client that still sends user_id does not
+    break, and the param has NO effect — it can't redirect the scope to
+    another principal's data."""
+    _patch_service(monkeypatch, scopes=["memory-neo:nodes:read"])
+
+    _seed_memory(SERVICE_SUB, "node-own", "caller's")
+    _seed_memory("usr_other_owner", "node-foreign", "someone else's")
+
+    r = client.get(
+        "/nodes/by-ids",
+        headers=_bearer(),
+        # stray user_id points at another principal — must be ignored
+        params={"ids": "node-own,node-foreign", "user_id": "usr_other_owner"},
+    )
+    assert r.status_code == 200, r.text
+    assert {n["id"] for n in r.json()["nodes"]} == {"node-own"}
 
 
 def test_nodes_by_ids_unknown_id_skipped(client, monkeypatch):
     _patch_service(monkeypatch, scopes=["memory-neo:nodes:read"])
 
-    _seed_memory("usr_m2m_nodes_test_a", "node-real", "exists")
+    _seed_memory(SERVICE_SUB, "node-real", "exists")
 
     r = client.get(
         "/nodes/by-ids",
         headers=_bearer(),
-        params={"ids": "node-real,does-not-exist", "user_id": "usr_m2m_nodes_test_a"},
+        params={"ids": "node-real,does-not-exist"},
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -328,31 +392,24 @@ def test_nodes_by_ids_unknown_id_skipped(client, monkeypatch):
 def test_nodes_by_ids_empty_ids_returns_empty(client, monkeypatch):
     _patch_service(monkeypatch, scopes=["memory-neo:nodes:read"])
 
-    r = client.get(
-        "/nodes/by-ids",
-        headers=_bearer(),
-        params={"ids": "", "user_id": "usr_m2m_nodes_test_a"},
-    )
+    r = client.get("/nodes/by-ids", headers=_bearer(), params={"ids": ""})
     assert r.status_code == 200
     assert r.json() == {"nodes": [], "count": 0}
 
 
-def test_nodes_by_ids_routing_not_captured_as_user_id(client, monkeypatch):
-    """Regression guard: GET /nodes/by-ids must not be matched by
-    GET /nodes/{user_id} (which would treat 'by-ids' as a user_id)."""
+def test_nodes_by_ids_missing_ids_returns_422(client, monkeypatch):
+    """`ids` stays required (422 when missing). Also a routing guard:
+    GET /nodes/by-ids must not be captured by GET /nodes/{user_id}
+    (which would treat 'by-ids' as a user_id and 200/403 instead)."""
     _patch_service(monkeypatch, scopes=["memory-neo:nodes:read"])
 
-    # If routing were wrong, this would return a {nodes, count} for
-    # user_id='by-ids' AND ignore the ids query param. We instead expect
-    # the by-ids handler to use the ids param (here empty → empty).
-    r = client.get(
-        "/nodes/by-ids",
-        headers=_bearer(),
-        params={"user_id": "usr_m2m_nodes_test_a"},  # 'ids' missing → 422
-    )
-    # Missing required 'ids' on by-ids handler → 422 from FastAPI validation.
-    # If routing were wrong (matched as /nodes/{user_id='by-ids'}), we'd get 200.
+    r = client.get("/nodes/by-ids", headers=_bearer())  # no 'ids'
     assert r.status_code == 422
+
+
+def test_nodes_by_ids_unauthenticated_returns_401(client):
+    r = client.get("/nodes/by-ids", params={"ids": "whatever"})
+    assert r.status_code == 401
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -396,3 +453,65 @@ def test_post_nodes_auth_gate_remains_open(client):
     # Negative: must NOT be auth-gated
     assert r.status_code != 401
     assert r.status_code != 403
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Unified auth matrix — one dependency accepts X-API-Key OR Bearer M2M,
+#    rejects no/invalid creds with 401. /context/index proves the schism is
+#    closed: a key holder can index with the SAME key it reads nodes with.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_context_index_with_x_api_key_returns_200(client, headers, monkeypatch):
+    """The crux of the sprint: /context/index accepts X-API-Key (legacy)
+    and 200s — no longer Bearer-only, no 403."""
+    r = client.post(
+        "/context/index",
+        headers=headers,  # X-API-Key
+        json={"episode_id": "ep-unified-key", "signature": _sig()},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["episode_id"] == "ep-unified-key"
+
+
+def test_context_index_with_bearer_service_returns_200(client, monkeypatch):
+    """Same endpoint, Bearer M2M with the write scope → 200. Both
+    credential families flow through the one dependency."""
+    _patch_service(monkeypatch, scopes=["memory-neo:episodes:write"])
+    r = client.post(
+        "/context/index",
+        headers=_bearer(),
+        json={"episode_id": "ep-unified-bearer", "signature": _sig()},
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_context_index_no_credentials_returns_401(client):
+    r = client.post(
+        "/context/index",
+        json={"episode_id": "ep-unified-none", "signature": _sig()},
+    )
+    assert r.status_code == 401
+
+
+def test_context_index_invalid_key_returns_401(client):
+    r = client.post(
+        "/context/index",
+        headers={"X-API-Key": "definitely-not-valid"},
+        json={"episode_id": "ep-unified-badkey", "signature": _sig()},
+    )
+    assert r.status_code == 401
+
+
+def test_context_index_invalid_bearer_returns_401(client, monkeypatch):
+    async def fake(token):
+        return None  # upstream rejects
+    monkeypatch.setattr("api.services.laboria_auth.validate_laboria_token", fake)
+    from api.services import laboria_auth
+    laboria_auth._cache.clear()
+
+    r = client.post(
+        "/context/index",
+        headers=_bearer(),
+        json={"episode_id": "ep-unified-badbearer", "signature": _sig()},
+    )
+    assert r.status_code == 401

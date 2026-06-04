@@ -179,3 +179,27 @@ def require_scope(auth: dict, scope: str) -> None:
                 detail=f"Missing required scope: {scope}",
             )
     # legacy + human → no-op (coexistence)
+
+
+def resolve_principal(auth: dict) -> tuple[str, str | None]:
+    """Derive the data-owner scope (user_id, tenant_id) from an authenticated
+    principal — the single source of truth for "whose data is this".
+
+    Identity is ALWAYS derived from the credential, never from a user_id
+    passed in a body/query/path. Every endpoint that reads or writes
+    user-scoped data resolves the owner through this one helper, so the
+    mapping is identical across /context/* and /nodes/*:
+
+      - laboria-auth + service : (claims.sub, claims.orgId)
+      - laboria-auth + human   : (claims.sub, None)
+      - legacy X-API-Key       : (User.id,   None)
+
+    A user_id supplied by the caller may only be used as a redundant
+    self-assertion (enforced `== resolve_principal(...)`, else 403). It can
+    never select another principal's data.
+    """
+    if auth.get("source") == "laboria-auth":
+        tenant = auth.get("org_id") if auth.get("type") == "service" else None
+        return auth["sub"], tenant
+    # legacy X-API-Key → Prisma User.id (dev: DEV_USER_ID)
+    return auth["id"], None

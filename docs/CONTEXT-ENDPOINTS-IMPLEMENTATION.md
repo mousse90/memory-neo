@@ -89,15 +89,22 @@ every axis on every episode.
 
 ## 5. Security
 
-- **Auth** : same `X-API-Key` mechanism as `POST /push` and
-  `POST /query`. In dev mode the `DEV_API_KEY` env var is honored.
-- **Scope** : every Cypher write/read is parameter-bound to the
-  caller's `user_id`. Episodes from other users are *never* returned
-  by `/context/query` — even when the filter explicitly names another
-  user.
-- **Payload `user_id`** : optional. If present it **must** equal the
-  caller's `user_id`, otherwise `403 user_id mismatch`. Per the
-  CONTEXT-API-SPEC.
+- **Auth** : the unified `require_auth` dependency — accepts **either**
+  `X-API-Key` (legacy, `DEV_API_KEY` in dev) **or** `Authorization:
+  Bearer <jwt>` (laboria-auth M2M / human). No credentials → `401`. This
+  is the same dependency used by the node-read endpoints, so a key holder
+  indexes context and reads nodes with one credential. See
+  [`NODE-HANDSHAKE-RECONCILIATION.md`](./NODE-HANDSHAKE-RECONCILIATION.md).
+- **Identity** : derived from the credential via
+  `auth.resolve_principal()` (legacy → `User.id`; laboria → `claims.sub`,
+  `+orgId` for services). Service principals need scope
+  `memory-neo:episodes:write` / `:read`; humans + legacy keys auto-pass.
+- **Scope** : every Cypher write/read is parameter-bound to that derived
+  identity. Episodes from other principals are *never* returned by
+  `/context/query` — even when the filter explicitly names another user.
+- **Payload `user_id`** : optional, redundant self-assertion. If present
+  it **must** equal the derived identity, otherwise `403 user_id
+  mismatch` (legacy callers). It can never select another principal.
 
 ## 6. v1 limitations (documented)
 

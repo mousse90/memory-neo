@@ -12,24 +12,14 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Header, Query
 from pydantic import BaseModel, Field
 
-from api.services.auth import require_auth, require_scope, require_valid_key
+from api.services.auth import (
+    require_auth,
+    require_scope,
+    require_valid_key,
+    resolve_principal,
+)
 from api.services.graph import fetch_context
 from api.services.context_graph import index_episode, query_episodes
-
-
-def _resolve_scope(auth: dict) -> tuple[str, str | None]:
-    """Return (scope_user_id, scope_tenant_id) for the authenticated caller.
-
-    Mapping per auth source (used as the Memgraph `scope_user_id`):
-      - laboria-auth + service : (claims.sub, claims.orgId)
-      - laboria-auth + human   : (claims.sub, None)
-      - legacy X-API-Key       : (User.id,   None)   — unchanged
-    """
-    if auth.get("source") == "laboria-auth":
-        tenant = auth.get("org_id") if auth.get("type") == "service" else None
-        return auth["sub"], tenant
-    # legacy → Prisma User.id
-    return auth["id"], None
 
 router = APIRouter()
 
@@ -124,7 +114,7 @@ async def index_context(
       5. Upsert Episode + axis nodes + relations (idempotent).
     """
     require_scope(auth, "memory-neo:episodes:write")
-    scope_uid, scope_tenant = _resolve_scope(auth)
+    scope_uid, scope_tenant = resolve_principal(auth)
 
     # Preserve the legacy contract: a legacy caller passing a user_id
     # that doesn't match its own User.id is rejected. Service callers
@@ -186,7 +176,7 @@ async def query_context(
     principal are never returned.
     """
     require_scope(auth, "memory-neo:episodes:read")
-    scope_uid, _ = _resolve_scope(auth)
+    scope_uid, _ = resolve_principal(auth)
 
     if (
         auth.get("source") == "legacy"

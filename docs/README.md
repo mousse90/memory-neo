@@ -144,6 +144,41 @@ curl -X POST https://memory-neo-api.fly.dev/context/query \
   }'
 ```
 
+Both `/context/*` endpoints (and the node-read endpoints below) accept
+**either** `X-API-Key: <key>` **or** `Authorization: Bearer <jwt>` (laboria
+M2M). The identity is derived from the credential — see
+[`NODE-HANDSHAKE-RECONCILIATION.md`](./NODE-HANDSHAKE-RECONCILIATION.md).
+
+---
+
+## Node read API (lazy-load consumers)
+
+Memory nodes (written by memwar / dogydoc) are read back **scoped to the
+caller's own identity** — derived from the credential, never from a
+`user_id` parameter. A key holder reads only its own nodes.
+
+```bash
+# Read a batch of YOUR nodes by id (the canonical read-by-id path).
+# Owner is derived from the key/token; ids you don't own are filtered out.
+curl "https://memory-neo-api.fly.dev/nodes/by-ids?ids=mem-1,mem-2,mem-3" \
+  -H "X-API-Key: $MN_KEY"
+# → { "nodes": [ … only the ids you own … ], "count": N }
+
+# List ALL your nodes. The path id must be your own, else 403.
+curl "https://memory-neo-api.fly.dev/nodes/$MY_USER_ID" \
+  -H "X-API-Key: $MN_KEY"
+```
+
+| Endpoint                       | Status | Notes |
+| ------------------------------ | ------ | ----- |
+| `GET /nodes/by-ids?ids=a,b`    | ✅     | Canonical read-by-id. Owner from credential. `user_id` param removed (a stray one is ignored). Missing `ids` → 422. |
+| `GET /nodes/{user_id}`         | ✅     | List all your nodes. `user_id` must equal your derived identity, else `403`. |
+| `GET /node/{id}` (singular)    | ⛔️     | **Retired.** Use `GET /nodes/by-ids?ids=<id>`. One read-by-id contract. |
+| `POST /nodes`                  | ✅     | Ingestion (memwar/dogydoc). Intentionally open — separate sprint. |
+
+Service principals (Bearer M2M) additionally need the
+`memory-neo:nodes:read` scope; humans and legacy keys auto-pass.
+
 ---
 
 ## Ignore patterns (`memIgnore`)
