@@ -98,10 +98,40 @@ async def create_node(
     return {"status": "created", "id": node.id}
 
 
-# ── Read endpoints ───────────────────────────────────────────────────────────
+# ── Read / batch endpoints ───────────────────────────────────────────────────
 #
 # Routing note: GET /nodes/by-ids MUST be declared before GET /nodes/{user_id}
 # — otherwise FastAPI matches "by-ids" as the path parameter `user_id`.
+
+
+class NodeIdsBatch(BaseModel):
+    ids: list[str]
+
+
+def _fetch_memory_by_ids(owner: str, id_list: list[str]) -> list[dict]:
+    """Read the caller's Memory nodes among `id_list`. Shared by the GET
+    (CSV query param) and POST (JSON body) variants. The scoped MATCH
+    filters out ids owned by another principal; unknown ids are skipped."""
+    if not id_list:
+        return []
+    driver = get_graph_client()
+    try:
+        with driver.session() as session:
+            result = session.run(
+                """
+                MATCH (u:User {id: $owner})-[:HAS_MEMORY]->(m:`Memory`)
+                WHERE m.id IN $ids
+                RETURN m.id AS id, m.content AS content,
+                       m.memory_type AS memory_type, m.app_id AS app_id,
+                       m.user_id AS user_id, m.tags AS tags,
+                       m.created_at AS created_at
+                """,
+                owner=owner, ids=id_list,
+            )
+            return [dict(record) for record in result]
+    finally:
+        driver.close()
+
 
 @router.get("/nodes/by-ids")
 async def get_nodes_by_ids(
@@ -117,34 +147,66 @@ async def get_nodes_by_ids(
 
     Returns only the requested ids that exist AND belong to the caller —
     ids owned by another principal are silently filtered out (never
-    leaked), unknown ids are skipped.
+    leaked), unknown ids are skipped. For large batches prefer the POST
+    variant (no URL length ceiling).
     """
     require_scope(auth, "memory-neo:nodes:read")
     owner, _ = resolve_principal(auth)
+    id_list = [s.strip() for s in ids.split(",") if s.strip()]
+    nodes = _fetch_memory_by_ids(owner, id_list)
+    return {"nodes": nodes, "count": len(nodes)}
 
+
+@router.post("/nodes/by-ids")
+async def post_nodes_by_ids(
+    body: NodeIdsBatch,
+    auth: dict = Depends(require_auth),
+):
+    """Batch read by id via POST body (`{ids: [...]}`) — same auth, scoping
+    and response shape as GET /nodes/by-ids, with no CSV-in-URL length
+    ceiling. Intended for the recall/synthesis layer (RLM/MDASH)."""
+    require_scope(auth, "memory-neo:nodes:read")
+    owner, _ = resolve_principal(auth)
+    id_list = [s.strip() for s in body.ids if s and s.strip()]
+    nodes = _fetch_memory_by_ids(owner, id_list)
+    return {"nodes": nodes, "count": len(nodes)}
+
+
+@router.delete("/nodes/by-ids")
+async def delete_nodes_by_ids(
+    ids: str = Query(..., description="Comma-separated Memory node ids"),
+    auth: dict = Depends(require_auth),
+):
+    """Delete the caller's Memory nodes among `ids` (DETACH DELETE). Ids of
+    another principal / unknown are silently ignored — only the caller's
+    own nodes are removed. Deletion is a write-class action → scope
+    `memory-neo:nodes:write`. Returns `{deleted: n}` (counted before the
+    delete for portability across Memgraph versions)."""
+    require_scope(auth, "memory-neo:nodes:write")
+    owner, _ = resolve_principal(auth)
     id_list = [s.strip() for s in ids.split(",") if s.strip()]
     if not id_list:
-        return {"nodes": [], "count": 0}
+        return {"deleted": 0}
 
     driver = get_graph_client()
     try:
         with driver.session() as session:
-            result = session.run(
-                """
-                MATCH (u:User {id: $owner})-[:HAS_MEMORY]->(m:`Memory`)
-                WHERE m.id IN $ids
-                RETURN m.id AS id, m.content AS content,
-                       m.memory_type AS memory_type, m.app_id AS app_id,
-                       m.user_id AS user_id, m.tags AS tags,
-                       m.created_at AS created_at
-                """,
+            row = session.run(
+                "MATCH (u:User {id: $owner})-[:HAS_MEMORY]->(m:`Memory`) "
+                "WHERE m.id IN $ids RETURN count(m) AS c",
                 owner=owner, ids=id_list,
-            )
-            nodes = [dict(record) for record in result]
+            ).single()
+            deleted = row["c"] if row else 0
+            if deleted:
+                session.run(
+                    "MATCH (u:User {id: $owner})-[:HAS_MEMORY]->(m:`Memory`) "
+                    "WHERE m.id IN $ids DETACH DELETE m",
+                    owner=owner, ids=id_list,
+                )
     finally:
         driver.close()
 
-    return {"nodes": nodes, "count": len(nodes)}
+    return {"deleted": deleted}
 
 
 @router.get("/nodes/{user_id}")

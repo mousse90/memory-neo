@@ -352,3 +352,110 @@ async def query_episodes(
         "count": len(episode_ids),
         "matched_axes_per_episode": matched,
     }
+
+
+# ── Hydration + delete (NODE-OWNERSHIP recall surfaces) ───────────────────────
+
+def _first(xs: list | None) -> Any:
+    return xs[0] if xs else None
+
+
+async def hydrate_episodes(user_id: str, episode_ids: list[str]) -> dict:
+    """Hydrate a batch of Episodes by id, scoped to `user_id`.
+
+    Returns each episode's stored properties (id surfaced as `episode_id`,
+    plus when / scope_user_id / scope_tenant_id …) PLUS its axes
+    reconstructed from relations (activity, activity_object, where_label,
+    when_relative, topic_tags). Internal bookkeeping props (leading `_`)
+    are stripped.
+
+    Episodes owned by a different principal are never matched (silently
+    filtered), unknown ids are skipped — same semantics as /nodes/by-ids.
+
+    Returns { episodes: [...], count }.
+    """
+    ids = [s for s in (episode_ids or []) if s]
+    if not ids:
+        return {"episodes": [], "count": 0}
+
+    driver = get_graph_client()
+    try:
+        with driver.session() as session:
+            result = session.run(
+                """
+                MATCH (e:Episode {scope_user_id: $uid})
+                WHERE e.id IN $ids
+                OPTIONAL MATCH (e)-[:OCCURRED_DURING]->(a:Activity)
+                OPTIONAL MATCH (e)-[:ABOUT_OBJECT]->(o:ActivityObject)
+                OPTIONAL MATCH (e)-[:AT_LOCATION]->(w:Where)
+                OPTIONAL MATCH (e)-[:AT_TIMESLOT]->(ts:TimeSlot)
+                OPTIONAL MATCH (e)-[:ON_TOPIC]->(t:Topic)
+                WITH e,
+                     collect(DISTINCT a.name)  AS activities,
+                     collect(DISTINCT o.name)  AS objects,
+                     collect(DISTINCT w.name)  AS wheres,
+                     collect(DISTINCT ts.name) AS timeslots,
+                     collect(DISTINCT t.name)  AS topics
+                RETURN properties(e) AS props,
+                       activities, objects, wheres, timeslots, topics
+                """,
+                uid=user_id, ids=ids,
+            )
+            records = [dict(r) for r in result]
+    finally:
+        driver.close()
+
+    episodes: list[dict] = []
+    for rec in records:
+        props = {
+            k: v for k, v in (rec.get("props") or {}).items()
+            if not k.startswith("_")
+        }
+        episode_id = props.pop("id", None)
+        episodes.append({
+            "episode_id": episode_id,
+            **props,                                    # when, scope_user_id, scope_tenant_id, …
+            "activity":        _first(rec.get("activities")),
+            "activity_object": _first(rec.get("objects")),
+            "where_label":     _first(rec.get("wheres")),
+            "when_relative":   _first(rec.get("timeslots")),
+            "topic_tags":      rec.get("topics") or [],
+        })
+
+    return {"episodes": episodes, "count": len(episodes)}
+
+
+async def delete_episodes(user_id: str, episode_ids: list[str]) -> dict:
+    """Delete the caller's Episodes by id (DETACH DELETE — removes each
+    Episode and its relations to axis nodes). Axis nodes (Activity, Topic,
+    …) are SHARED across episodes and are intentionally NOT deleted.
+
+    Only episodes owned by `user_id` are touched; ids belonging to another
+    principal or unknown are silently ignored.
+
+    Returns { deleted: n } — n = episodes actually removed. Counted before
+    the delete (portable across Memgraph versions; avoids RETURN-after-DELETE).
+    """
+    ids = [s for s in (episode_ids or []) if s]
+    if not ids:
+        return {"deleted": 0}
+
+    driver = get_graph_client()
+    try:
+        with driver.session() as session:
+            row = session.run(
+                "MATCH (e:Episode {scope_user_id: $uid}) WHERE e.id IN $ids "
+                "RETURN count(e) AS c",
+                uid=user_id, ids=ids,
+            ).single()
+            deleted = row["c"] if row else 0
+            if deleted:
+                session.run(
+                    "MATCH (e:Episode {scope_user_id: $uid}) WHERE e.id IN $ids "
+                    "DETACH DELETE e",
+                    uid=user_id, ids=ids,
+                )
+    finally:
+        driver.close()
+
+    return {"deleted": deleted}

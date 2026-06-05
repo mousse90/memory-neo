@@ -19,7 +19,12 @@ from api.services.auth import (
     resolve_principal,
 )
 from api.services.graph import fetch_context
-from api.services.context_graph import index_episode, query_episodes
+from api.services.context_graph import (
+    index_episode,
+    query_episodes,
+    hydrate_episodes,
+    delete_episodes,
+)
 
 router = APIRouter()
 
@@ -192,3 +197,47 @@ async def query_context(
         limit=body.limit,
     )
     return ContextQueryResponse(**result)
+
+
+# ── POST /context/episodes/by-ids — hydration ────────────────────────────────
+
+class EpisodeIdsBatch(BaseModel):
+    episode_ids: list[str]
+
+
+@router.post("/context/episodes/by-ids")
+async def hydrate_context_episodes(
+    body: EpisodeIdsBatch,
+    auth: dict = Depends(require_auth),
+):
+    """Hydrate a batch of Episodes (full props + axes) for the recall layer.
+
+    POST body (`{episode_ids: [...]}`) — no CSV-in-URL length ceiling.
+    Identity derives from the credential (`resolve_principal`), same scoping
+    as /context/query. Episodes owned by another principal are silently
+    filtered (never leaked); unknown ids are skipped.
+
+    Returns `{episodes: [{episode_id, when, when_relative, activity,
+    activity_object, topic_tags, where_label, …}], count}`.
+    """
+    require_scope(auth, "memory-neo:episodes:read")
+    scope_uid, _ = resolve_principal(auth)
+    return await hydrate_episodes(user_id=scope_uid, episode_ids=body.episode_ids)
+
+
+# ── DELETE /context/episodes/by-ids — scoped delete ──────────────────────────
+
+@router.delete("/context/episodes/by-ids")
+async def delete_context_episodes(
+    ids: str = Query(..., description="Comma-separated Episode ids"),
+    auth: dict = Depends(require_auth),
+):
+    """Delete the caller's Episodes (and their relations; shared axis nodes
+    are preserved). Deletion is a write-class action → scope
+    `memory-neo:episodes:write`. Ids of other principals / unknown are
+    silently ignored. Returns `{deleted: n}`.
+    """
+    require_scope(auth, "memory-neo:episodes:write")
+    scope_uid, _ = resolve_principal(auth)
+    id_list = [s.strip() for s in ids.split(",") if s.strip()]
+    return await delete_episodes(user_id=scope_uid, episode_ids=id_list)

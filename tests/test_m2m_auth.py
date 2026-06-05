@@ -585,3 +585,178 @@ def test_context_index_invalid_bearer_returns_401(client, monkeypatch):
         json={"episode_id": "ep-unified-badbearer", "signature": _sig()},
     )
     assert r.status_code == 401
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. NODE-OWNERSHIP recall surfaces — hydration, batch read, scoped deletes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _episode_exists(eid: str, uid: str) -> bool:
+    from api.services.graph import get_graph_client
+    driver = get_graph_client()
+    try:
+        with driver.session() as s:
+            row = s.run(
+                "MATCH (e:Episode {id: $id, scope_user_id: $uid}) RETURN count(e) AS c",
+                id=eid, uid=uid,
+            ).single()
+            return (row["c"] if row else 0) > 0
+    finally:
+        driver.close()
+
+
+def _axis_count(label: str, name: str, uid: str) -> int:
+    from api.services.graph import get_graph_client
+    driver = get_graph_client()
+    try:
+        with driver.session() as s:
+            row = s.run(
+                f"MATCH (n:{label} {{name: $name, scope_user_id: $uid}}) "
+                "RETURN count(n) AS c",
+                name=name, uid=uid,
+            ).single()
+            return row["c"] if row else 0
+    finally:
+        driver.close()
+
+
+# ── POST /context/episodes/by-ids — hydration ────────────────────────────────
+
+def test_hydrate_episodes_returns_props_and_axes(client, headers, user_id):
+    eid = "ep-hyd-1"
+    assert client.post("/context/index", headers=headers,
+                       json={"episode_id": eid, "signature": _sig()}).status_code == 200
+    r = client.post("/context/episodes/by-ids", headers=headers,
+                    json={"episode_ids": [eid]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["count"] == 1
+    ep = body["episodes"][0]
+    assert ep["episode_id"] == eid
+    assert ep["scope_user_id"] == user_id
+    assert "when" in ep                       # stored Episode property
+    assert ep["activity"] == "coding"
+    assert ep["activity_object"] == "RePTiLS"
+    assert ep["where_label"] == "domicile"
+    assert ep["when_relative"] == "morning"
+    assert set(ep["topic_tags"]) == {"evanescence", "compression"}
+
+
+def test_hydrate_episodes_scoped_never_leaks(client, headers, monkeypatch):
+    assert client.post("/context/index", headers=headers,
+                       json={"episode_id": "ep-hyd-legacy", "signature": _sig()}).status_code == 200
+    _patch_service(monkeypatch, scopes=["memory-neo:episodes:write", "memory-neo:episodes:read"])
+    assert client.post("/context/index", headers=_bearer(),
+                       json={"episode_id": "ep-hyd-svc", "signature": _sig()}).status_code == 200
+    # legacy hydrates BOTH ids (+ an unknown) → only its own comes back
+    r = client.post("/context/episodes/by-ids", headers=headers,
+                    json={"episode_ids": ["ep-hyd-legacy", "ep-hyd-svc", "ep-unknown"]})
+    assert r.status_code == 200, r.text
+    assert {e["episode_id"] for e in r.json()["episodes"]} == {"ep-hyd-legacy"}
+
+
+def test_hydrate_episodes_large_batch_no_url_ceiling(client, headers):
+    assert client.post("/context/index", headers=headers,
+                       json={"episode_id": "ep-hyd-big", "signature": _sig()}).status_code == 200
+    ids = [f"ep-fake-{i}" for i in range(120)] + ["ep-hyd-big"]   # 121 ids in the body
+    r = client.post("/context/episodes/by-ids", headers=headers,
+                    json={"episode_ids": ids})
+    assert r.status_code == 200, r.text
+    assert {e["episode_id"] for e in r.json()["episodes"]} == {"ep-hyd-big"}
+
+
+def test_hydrate_episodes_missing_scope_403(client, monkeypatch):
+    _patch_service(monkeypatch, scopes=["memory-neo:episodes:write"])  # not read
+    r = client.post("/context/episodes/by-ids", headers=_bearer(),
+                    json={"episode_ids": ["x"]})
+    assert r.status_code == 403
+    assert "memory-neo:episodes:read" in r.json()["detail"]
+
+
+def test_hydrate_episodes_unauthenticated_401(client):
+    r = client.post("/context/episodes/by-ids", json={"episode_ids": ["x"]})
+    assert r.status_code == 401
+
+
+# ── POST /nodes/by-ids — parity with GET + scoping ───────────────────────────
+
+def test_post_nodes_by_ids_parity_with_get(client, headers):
+    _seed_memory(LEGACY_UID, "p-1", "a")
+    _seed_memory(LEGACY_UID, "p-2", "b")
+    g = client.get("/nodes/by-ids", headers=headers, params={"ids": "p-1,p-2"})
+    p = client.post("/nodes/by-ids", headers=headers, json={"ids": ["p-1", "p-2"]})
+    assert g.status_code == 200 and p.status_code == 200, (g.text, p.text)
+    assert g.json() == p.json()
+    assert {n["id"] for n in p.json()["nodes"]} == {"p-1", "p-2"}
+
+
+def test_post_nodes_by_ids_scoped_never_leaks(client, monkeypatch):
+    _patch_service(monkeypatch, scopes=["memory-neo:nodes:read"])
+    _seed_memory(SERVICE_SUB, "pmix-mine", "mine")
+    _seed_memory("usr_other_owner", "pmix-other", "theirs")
+    r = client.post("/nodes/by-ids", headers=_bearer(),
+                    json={"ids": ["pmix-mine", "pmix-other"]})
+    assert r.status_code == 200, r.text
+    assert {n["id"] for n in r.json()["nodes"]} == {"pmix-mine"}
+
+
+def test_post_nodes_by_ids_unauthenticated_401(client):
+    r = client.post("/nodes/by-ids", json={"ids": ["x"]})
+    assert r.status_code == 401
+
+
+# ── DELETE /nodes/by-ids — scoped delete ─────────────────────────────────────
+
+def test_delete_nodes_by_ids_only_caller(client, headers):
+    _seed_memory(LEGACY_UID, "del-mine-1", "m1")
+    _seed_memory(LEGACY_UID, "del-mine-2", "m2")
+    _seed_memory("usr_other_owner", "del-other", "o")
+    r = client.delete("/nodes/by-ids", headers=headers,
+                      params={"ids": "del-mine-1,del-mine-2,del-other,del-unknown"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"deleted": 2}
+    # caller's gone, another principal's untouched
+    g = client.get("/nodes/by-ids", headers=headers,
+                   params={"ids": "del-mine-1,del-mine-2"})
+    assert g.json()["count"] == 0
+    assert _memory_owner("del-other")[0] == "usr_other_owner"
+
+
+def test_delete_nodes_by_ids_missing_scope_403(client, monkeypatch):
+    _patch_service(monkeypatch, scopes=["memory-neo:nodes:read"])  # not :write
+    r = client.delete("/nodes/by-ids", headers=_bearer(), params={"ids": "x"})
+    assert r.status_code == 403
+    assert "memory-neo:nodes:write" in r.json()["detail"]
+
+
+def test_delete_nodes_by_ids_unauthenticated_401(client):
+    r = client.delete("/nodes/by-ids", params={"ids": "x"})
+    assert r.status_code == 401
+
+
+# ── DELETE /context/episodes/by-ids — scoped, axes preserved ─────────────────
+
+def test_delete_episodes_only_caller_preserves_axes(client, headers, monkeypatch):
+    assert client.post("/context/index", headers=headers,
+                       json={"episode_id": "ep-del-legacy",
+                             "signature": _sig(activity="coding")}).status_code == 200
+    _patch_service(monkeypatch, scopes=["memory-neo:episodes:write"])
+    assert client.post("/context/index", headers=_bearer(),
+                       json={"episode_id": "ep-del-svc",
+                             "signature": _sig(activity="coding")}).status_code == 200
+    # legacy deletes BOTH ids (+ unknown) → only its own removed
+    r = client.delete("/context/episodes/by-ids", headers=headers,
+                      params={"ids": "ep-del-legacy,ep-del-svc,ep-unknown"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"deleted": 1}
+    assert not _episode_exists("ep-del-legacy", LEGACY_UID)
+    assert _episode_exists("ep-del-svc", SERVICE_SUB)            # other scope untouched
+    # the shared axis node (Activity 'coding', caller's scope) is preserved
+    assert _axis_count("Activity", "coding", LEGACY_UID) >= 1
+
+
+def test_delete_episodes_missing_scope_403(client, monkeypatch):
+    _patch_service(monkeypatch, scopes=["memory-neo:episodes:read"])  # not :write
+    r = client.delete("/context/episodes/by-ids", headers=_bearer(), params={"ids": "x"})
+    assert r.status_code == 403
+    assert "memory-neo:episodes:write" in r.json()["detail"]
