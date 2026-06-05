@@ -132,15 +132,21 @@ async def write_project_to_graph(
 
 # ── Read ──────────────────────────────────────────────────────────────────────
 
-async def run_cypher_query(cypher: str) -> list[dict]:
+async def run_cypher_query(cypher: str, params: dict | None = None) -> list[dict]:
     """
     Execute a read-only Cypher query against Memgraph.
+
+    `params` binds query parameters ($name). ALWAYS pass caller-derived
+    values (namespace, prefixes, ids) this way — never string-interpolate
+    them into the query text (Cypher injection). Existing callers that pass
+    no params keep working unchanged.
+
     Returns list of record dicts.
     """
     driver = get_graph_client()
     try:
         with driver.session() as session:
-            result = session.run(cypher)
+            result = session.run(cypher, **(params or {}))
             return [dict(record) for record in result]
     finally:
         driver.close()

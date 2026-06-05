@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 import os
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env'))
 
-from fastapi import Depends, FastAPI, Header
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
@@ -101,16 +101,21 @@ async def get_graph(
 ):
     from api.services.auth import require_valid_key
     from api.services.graph import run_cypher_query
-    await require_valid_key(x_api_key)
-    namespace = f"{user_id}::{project_name}"
-    results = await run_cypher_query(f"""
-        MATCH (f:File {{namespace: "{namespace}"}})
-        OPTIONAL MATCH (f)-[:HAS_FUNCTION]->(fn:Function {{namespace: "{namespace}"}})
+    user = await require_valid_key(x_api_key)
+    if user_id != user["id"]:
+        raise HTTPException(status_code=403, detail="user_id mismatch")
+    namespace = f"{user['id']}::{project_name}"
+    results = await run_cypher_query(
+        """
+        MATCH (f:File {namespace: $namespace})
+        OPTIONAL MATCH (f)-[:HAS_FUNCTION]->(fn:Function {namespace: $namespace})
         RETURN f.name AS file_name, f.path AS file_path, f.extension AS extension,
                f.lines AS lines, fn.name AS fn_name, fn.start_line AS start_line,
                fn.end_line AS end_line, fn.code AS code
         ORDER BY f.path, fn.start_line
-    """)
+        """,
+        params={"namespace": namespace},
+    )
     return {"results": results}
 
 
@@ -125,11 +130,14 @@ async def list_projects(
     if ENVIRONMENT == "development":
         # In dev mode, query Memgraph directly for distinct namespaces
         from api.services.graph import run_cypher_query
-        results = await run_cypher_query(f"""
+        results = await run_cypher_query(
+            """
             MATCH (p:Project)
-            WHERE p.namespace STARTS WITH "{user['id']}::"
+            WHERE p.namespace STARTS WITH $prefix
             RETURN p.name AS name, p.namespace AS namespace
-        """)
+            """,
+            params={"prefix": f"{user['id']}::"},
+        )
         return {"projects": results}
 
     from api.db.prisma import get_db

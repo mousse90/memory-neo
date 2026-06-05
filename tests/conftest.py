@@ -115,6 +115,7 @@ def pytest_collection_modifyitems(config, items):
         "test_context_index.py",
         "test_context_query.py",
         "test_m2m_auth.py",
+        "test_graph_guard.py",
     )
     for item in items:
         if any(name in item.nodeid for name in integration_files):
