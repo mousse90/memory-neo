@@ -1,8 +1,34 @@
 # memory-neo `/context/*` API — spec (TODO côté memory-neo)
 
 **Sprint** : CONTEXT-SIGNATURE — 2026-05-20
-**Statut** : spec **à implémenter** côté memory-neo. RePTiLS consomme
-ces endpoints mais soft-fail en cas de 404 → mode dégradé propre.
+**Statut** : ✅ **implémenté** (memory-neo ≥ 0.2.0). Section auth mise à
+jour en NODE-OWNERSHIP (0.4.0).
+
+---
+
+## 0. Authentification (mise à jour NODE-OWNERSHIP)
+
+Tous les endpoints `/context/*` passent par la dépendance unique
+`require_auth`. Ils acceptent **soit** `X-API-Key: <mnk_…>` (canal
+propriétaire, legacy), **soit** `Authorization: Bearer <jwt>` (canal
+service M2M laboria-auth). Aucun credential → `401`.
+
+L'identité (`scope_user_id`) **dérive du credential** via
+`resolve_principal`, jamais d'un `user_id` du payload :
+
+- legacy `X-API-Key` → `User.id`
+- laboria service → `claims.sub` (+ `orgId` comme `scope_tenant_id`)
+
+Scopes (principals **service** uniquement ; humains + clés legacy
+auto-pass) : `memory-neo:episodes:write` (index / delete),
+`memory-neo:episodes:read` (query / hydrate). Un `user_id` dans le body
+n'est qu'une auto-assertion : s'il diffère de l'identité dérivée → `403`.
+Détails dans [`OWNERSHIP-CONTRACT.md`](./OWNERSHIP-CONTRACT.md).
+
+Endpoints de rappel ajoutés (NODE-OWNERSHIP) :
+`POST /context/episodes/by-ids` (hydrate épisodes, `episodes:read`) et
+`DELETE /context/episodes/by-ids?ids=…` (`episodes:write`, nœuds d'axes
+partagés préservés).
 
 ---
 
@@ -15,13 +41,13 @@ en parallèle des nodes `Memory`.
 
 ```
 POST /context/index
-Headers: X-API-Key: <…>
+Headers: X-API-Key: <mnk_…>   |   Authorization: Bearer <jwt>
 Content-Type: application/json
 ```
 
 ```jsonc
 {
-  "user_id": "<l'utilisateur lié à la clé X-API-Key, optionnel>",
+  "user_id": "<auto-assertion optionnelle ; doit == l'identité dérivée du credential, sinon 403>",
   "episode_id": "ep-xxx",
   "signature": {
     "when": "2026-05-20T10:23:00Z",
@@ -143,10 +169,12 @@ RETURN e.id AS id, … LIMIT $limit
 
 ## 3. Multi-tenant
 
-Les routes filtrent obligatoirement sur le scope du caller (résolu
-depuis l'`X-API-Key` côté memory-neo). Un `episode_id` qui n'appartient
-pas au scope du caller est traité comme inexistant — 404 sur `index`,
-absent du résultat sur `query`.
+Les routes filtrent obligatoirement sur le scope du caller, **résolu
+depuis le credential** (`X-API-Key` **ou** `Bearer` M2M) via
+`resolve_principal` — jamais d'un `user_id` du payload. Un `episode_id`
+qui n'appartient pas au scope du caller est traité comme inexistant —
+absent du résultat sur `query` et `episodes/by-ids`, ignoré par les
+`DELETE` scopés.
 
 ## 4. Indexation recommandée
 

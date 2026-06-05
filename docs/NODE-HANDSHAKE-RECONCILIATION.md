@@ -106,10 +106,12 @@ Rationale: the batch endpoint subsumes the singular, keeps a single
 ownership-scoped code path, and avoids two divergent contracts. Callers
 hitting `/node/{id}` get `404` by design.
 
-### `POST /nodes`  — unchanged, intentionally open
+### `POST /nodes`  — CLOSED in NODE-OWNERSHIP (see §4)
 
-dogydoc still writes here without credentials (see the handler docstring).
-Closing it is a separate sprint (provision `svc_dogydoc` upstream first).
+Originally left open; **closed** by the NODE-OWNERSHIP sprint (2026-06).
+Ownership now derives from the credential; `user_id` / `relationship` are
+optional self-assertions. No credential → `401`. dogydoc must migrate its
+client to send its owner credential BEFORE any real ingestion.
 
 ---
 
@@ -123,3 +125,49 @@ A holder of a credential (legacy `X-API-Key` or laboria Bearer) can:
   (`X-API-Key` → 200, Bearer service+scope → 200).
 
 Never log a key. Raw upstream errors are surfaced as-is.
+
+---
+
+## 4. NODE-OWNERSHIP (2026-06) — absorbs & closes handshake 2/3 + 3/3
+
+The NODE-OWNERSHIP sprint folds the remaining handshake volets into a
+single principle extended from reads (1/3) to **writes and everything
+else**: the identity always derives from the credential
+(`resolve_principal`), never from the payload. memory-neo is now a
+**personal-memory store** — an open write hole is unacceptable.
+
+**Closes 2/3 — write by credential:**
+
+- `POST /nodes` — auth required (`memory-neo:nodes:write` for services);
+  owner derived from the credential and used as the SOLE owner in Cypher.
+  `user_id` / `relationship.from_id` are optional self-assertions (403 on
+  mismatch). `:Memory` label backticked (closes the local-image debt).
+- `GET /graph/{project_name}` — same guard as `/push` (`user_id` must equal
+  the key's id → 403 otherwise); namespace derived from the credential.
+  The namespace is now a **bound `$param`**, not an f-string — Cypher
+  injection closed. Same `$prefix` fix on the dev `/projects` branch.
+
+**Closes 3/3 — client alignment / channel ownership:**
+
+- **RePTiLS is PAUSED.** Its `v0.3.1` service-Bearer contract for
+  `/context/*` (`svc_reptils`) stays valid for the day it resumes, but no
+  active integration depends on it now.
+- The **owner-key channel** (per-account `X-API-Key`) becomes the primary
+  channel, serving the upcoming **PONT-MEMOIRE / RLM-MDASH** recall &
+  synthesis layer.
+
+**New recall surfaces (for RLM/MDASH):**
+
+| Endpoint | Scope | Notes |
+| --- | --- | --- |
+| `POST /context/episodes/by-ids` | `episodes:read` | Hydrate episodes (props + axes), body `{episode_ids}`, no URL ceiling. |
+| `POST /nodes/by-ids` | `nodes:read` | Batch read by body `{ids}` — parity with the GET. |
+| `DELETE /nodes/by-ids?ids=…` | `nodes:write` | DETACH DELETE the caller's Memory only → `{deleted:n}`. |
+| `DELETE /context/episodes/by-ids?ids=…` | `episodes:write` | Delete the caller's Episodes (+ relations); shared axis nodes preserved → `{deleted:n}`. |
+
+All four scope to `resolve_principal(auth)` and silently filter ids owned
+by another principal (never leaked). See
+[`OWNERSHIP-CONTRACT.md`](./OWNERSHIP-CONTRACT.md) for the two-channel model
+and [`CONSUMERS.md`](./CONSUMERS.md) for the consumer registry.
+
+API version: `0.3.0` → `0.4.0`. **Local-only sprint — not deployed.**
