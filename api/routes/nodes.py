@@ -15,7 +15,7 @@ router = APIRouter()
 class Relationship(BaseModel):
     type: str = "HAS_MEMORY"
     from_label: str = "User"
-    from_id: str
+    from_id: str | None = None
 
 
 class MemoryNode(BaseModel):
@@ -23,43 +23,72 @@ class MemoryNode(BaseModel):
     content: str
     memory_type: str
     app_id: str
-    user_id: str
+    user_id: str | None = None
     tags: list[str] = []
     created_at: str
-    relationship: Relationship
+    relationship: Relationship | None = None
 
 
 @router.post("/nodes")
-async def create_node(node: MemoryNode):
-    """⚠️ Intentionally OPEN (no auth).
+async def create_node(
+    node: MemoryNode,
+    auth: dict = Depends(require_auth),
+):
+    """Ingest a Memory node owned by the authenticated caller.
 
-    dogydoc writes here without credentials. Closing this endpoint will
-    silently break ingestion until svc_dogydoc is provisioned upstream
-    and dogydoc is updated to send a Bearer token. Handled in a separate
-    sprint.
+    Ownership is derived from the credential (`resolve_principal`) and is
+    the SOLE source of the owner: the node and its
+    `(:User)-[:HAS_MEMORY]->(:Memory)` edge are always written under that
+    identity, never under a value taken from the payload.
+
+    `user_id` and `relationship` are optional self-assertions, kept so the
+    old full client shape still validates: if supplied they MUST equal the
+    derived owner, otherwise `403`. Sent neither → the owner is derived
+    silently and the edge defaults to `HAS_MEMORY` from the owner.
+
+    No credential → `401`. Service principals need `memory-neo:nodes:write`
+    (humans / legacy keys auto-pass).
+
+    Migration note: this endpoint is NO LONGER open. dogydoc must send its
+    owner credential (the account's X-API-Key, or a provisioned Bearer)
+    BEFORE any real ingestion — until migrated, its writes will 401.
     """
+    require_scope(auth, "memory-neo:nodes:write")
+    owner, _ = resolve_principal(auth)
+
+    # Optional self-assertions: a supplied user_id / from_id may only
+    # confirm the derived owner — it can never select another principal.
+    if node.user_id is not None and node.user_id != owner:
+        raise HTTPException(status_code=403, detail="user_id mismatch")
+    if (
+        node.relationship is not None
+        and node.relationship.from_id is not None
+        and node.relationship.from_id != owner
+    ):
+        raise HTTPException(status_code=403, detail="from_id mismatch")
+
     driver = get_graph_client()
     try:
         with driver.session() as session:
             session.run(
                 """
-                MERGE (u:User {id: $user_id})
-                CREATE (m:Memory {
+                MERGE (u:User {id: $owner})
+                CREATE (m:`Memory` {
                     id:          $id,
                     content:     $content,
                     memory_type: $memory_type,
                     app_id:      $app_id,
-                    user_id:     $user_id,
+                    user_id:     $owner,
                     tags:        $tags,
                     created_at:  $created_at
                 })
                 CREATE (u)-[:HAS_MEMORY]->(m)
                 """,
+                owner=owner,
                 id=node.id,
                 content=node.content,
                 memory_type=node.memory_type,
                 app_id=node.app_id,
-                user_id=node.user_id,
                 tags=node.tags,
                 created_at=node.created_at,
             )

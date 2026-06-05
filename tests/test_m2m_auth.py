@@ -431,28 +431,98 @@ def test_human_laboria_auth_passes_without_scopes(client, monkeypatch):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. POST /nodes stays OPEN (intentional)
+# 5. POST /nodes — CLOSED: ownership derived from the credential
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_post_nodes_auth_gate_remains_open(client):
-    """Sanity: POST /nodes must NOT reject an unauthenticated caller at
-    the auth layer. dogydoc depends on this until svc_dogydoc is
-    provisioned upstream.
+def _memory_owner(node_id: str):
+    """Return (edge_owner_id, m.user_id) for a Memory node, or (None, None).
 
-    We assert the auth gate by sending an INVALID body with no auth
-    headers and expecting Pydantic 422 (validation), NOT 401 or 403.
-    A 422 proves the request reached the handler — the auth middleware
-    let it through. We avoid asserting a successful write because the
-    local Memgraph image treats `Memory` as a reserved keyword (the
-    existing :Memory Cypher in POST /nodes works in prod but not here),
-    and per the recâblage instructions we are not modifying the POST
-    write path in this sprint.
-    """
-    r = client.post("/nodes", json={"id": "x"})  # missing required fields
-    assert r.status_code == 422, r.text
-    # Negative: must NOT be auth-gated
-    assert r.status_code != 401
-    assert r.status_code != 403
+    Proves the write went under the derived owner — both the
+    (:User)-[:HAS_MEMORY]-> edge and the stored m.user_id."""
+    from api.services.graph import get_graph_client
+    driver = get_graph_client()
+    try:
+        with driver.session() as session:
+            row = session.run(
+                "MATCH (u:User)-[:HAS_MEMORY]->(m:`Memory` {id: $id}) "
+                "RETURN u.id AS owner, m.user_id AS muid",
+                id=node_id,
+            ).single()
+            return (row["owner"], row["muid"]) if row else (None, None)
+    finally:
+        driver.close()
+
+
+def _node_body(node_id: str, **overrides) -> dict:
+    body = {
+        "id": node_id, "content": "hello", "memory_type": "context",
+        "app_id": "test", "created_at": "2026-06-06T10:00:00Z",
+    }
+    body.update(overrides)
+    return body
+
+
+def test_post_nodes_no_credentials_returns_401(client):
+    # Previously open; now closed. A valid body with no creds → 401.
+    r = client.post("/nodes", json=_node_body("n-noauth"))
+    assert r.status_code == 401
+
+
+def test_post_nodes_legacy_key_owner_is_user_id(client, headers):
+    nid = "n-legacy-own"
+    r = client.post("/nodes", headers=headers, json=_node_body(nid))
+    assert r.status_code == 200, r.text
+    assert _memory_owner(nid) == (LEGACY_UID, LEGACY_UID)
+
+
+def test_post_nodes_bearer_service_owner_is_sub(client, monkeypatch):
+    _patch_service(monkeypatch, scopes=["memory-neo:nodes:write"])
+    nid = "n-svc-own"
+    r = client.post("/nodes", headers=_bearer(), json=_node_body(nid))
+    assert r.status_code == 200, r.text
+    assert _memory_owner(nid) == (SERVICE_SUB, SERVICE_SUB)
+
+
+def test_post_nodes_service_missing_scope_returns_403(client, monkeypatch):
+    _patch_service(monkeypatch, scopes=["memory-neo:nodes:read"])  # not :write
+    r = client.post("/nodes", headers=_bearer(), json=_node_body("n-svc-noscope"))
+    assert r.status_code == 403
+    assert "memory-neo:nodes:write" in r.json()["detail"]
+
+
+def test_post_nodes_user_id_mismatch_returns_403(client, headers):
+    r = client.post("/nodes", headers=headers,
+                    json=_node_body("n-uid-mismatch", user_id="someone_else"))
+    assert r.status_code == 403
+    assert "user_id mismatch" in r.json()["detail"]
+
+
+def test_post_nodes_from_id_mismatch_returns_403(client, headers):
+    r = client.post("/nodes", headers=headers, json=_node_body(
+        "n-fid-mismatch",
+        relationship={"type": "HAS_MEMORY", "from_label": "User",
+                      "from_id": "someone_else"}))
+    assert r.status_code == 403
+    assert "from_id mismatch" in r.json()["detail"]
+
+
+def test_post_nodes_minimal_payload_derives_owner(client, headers):
+    # No user_id, no relationship → owner derived purely from the key.
+    nid = "n-minimal"
+    r = client.post("/nodes", headers=headers, json=_node_body(nid))
+    assert r.status_code == 200, r.text
+    assert _memory_owner(nid) == (LEGACY_UID, LEGACY_UID)
+
+
+def test_post_nodes_legacy_full_shape_matching_owner_ok(client, headers):
+    # The old full client shape, correctly asserting its own owner, still works.
+    nid = "n-fullshape"
+    r = client.post("/nodes", headers=headers, json=_node_body(
+        nid, user_id=LEGACY_UID,
+        relationship={"type": "HAS_MEMORY", "from_label": "User",
+                      "from_id": LEGACY_UID}))
+    assert r.status_code == 200, r.text
+    assert _memory_owner(nid)[0] == LEGACY_UID
 
 
 # ─────────────────────────────────────────────────────────────────────────────

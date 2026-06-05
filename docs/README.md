@@ -174,7 +174,7 @@ curl "https://memory-neo-api.fly.dev/nodes/$MY_USER_ID" \
 | `GET /nodes/by-ids?ids=a,b`    | ✅     | Canonical read-by-id. Owner from credential. `user_id` param removed (a stray one is ignored). Missing `ids` → 422. |
 | `GET /nodes/{user_id}`         | ✅     | List all your nodes. `user_id` must equal your derived identity, else `403`. |
 | `GET /node/{id}` (singular)    | ⛔️     | **Retired.** Use `GET /nodes/by-ids?ids=<id>`. One read-by-id contract. |
-| `POST /nodes`                  | ✅     | Ingestion (memwar/dogydoc). Intentionally open — separate sprint. |
+| `POST /nodes`                  | ✅     | Ingestion (memwar/dogydoc). **Auth required** — owner derived from the credential; `user_id`/`relationship` are optional self-assertions (403 on mismatch). Services need `memory-neo:nodes:write`. |
 
 Service principals (Bearer M2M) additionally need the
 `memory-neo:nodes:read` scope; humans and legacy keys auto-pass.
